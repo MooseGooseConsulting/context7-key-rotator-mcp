@@ -42,8 +42,8 @@ function createApi(): Context7ApiClient {
   return new Context7ApiClient(new RoundRobinKeyPool(["one", "two"]), fetchImpl);
 }
 
-async function startServer(): Promise<string> {
-  const server = createHttpMcpServer(createApi());
+async function startServer(api = createApi()): Promise<string> {
+  const server = createHttpMcpServer(api);
   servers.push(server);
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -97,5 +97,18 @@ describe("Streamable HTTP MCP endpoint", () => {
     expect(search.result.content[0].text).toContain("Available Libraries:");
     expect(search.result.content[0].text).toContain("Context7-compatible library ID: /prefecthq/fastmcp");
     expect(docs.result.content[0].text).toBe("Focused FastMCP documentation.");
+  });
+
+  it("returns an MCP tool error after both Context7 keys are blocked", async () => {
+    const blockedFetch: FetchLike = async () => new Response("both keys blocked", { status: 429 });
+    const api = new Context7ApiClient(new RoundRobinKeyPool(["one", "two"]), blockedFetch);
+
+    const response = await postMcp(await startServer(api), "tools/call", 4, "query-docs", {
+      libraryId: "/prefecthq/fastmcp",
+      query: "Create a Streamable HTTP server",
+    });
+
+    expect(response.result.isError).toBe(true);
+    expect(response.result.content[0].text).toBe("both keys blocked");
   });
 });
