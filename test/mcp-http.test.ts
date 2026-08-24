@@ -1,4 +1,3 @@
-import { once } from "node:events";
 import type { Server } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import { Context7ApiClient, type FetchLike } from "../src/context7-api.js";
@@ -15,10 +14,11 @@ const clientMeta = {
 const servers: Server[] = [];
 
 afterEach(async () => {
-  await Promise.all(servers.splice(0).map(async (server) => {
-    server.close();
-    await once(server, "close");
-  }));
+  await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve, reject) => {
+    server.closeIdleConnections();
+    server.closeAllConnections();
+    server.close((error) => error ? reject(error) : resolve());
+  })));
 });
 
 function createApi(): Context7ApiClient {
@@ -45,8 +45,14 @@ function createApi(): Context7ApiClient {
 async function startServer(api = createApi()): Promise<string> {
   const server = createHttpMcpServer(api);
   servers.push(server);
-  server.listen(0, "127.0.0.1");
-  await once(server, "listening");
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error) => reject(error);
+    server.once("error", onError);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", onError);
+      resolve();
+    });
+  });
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Expected a TCP listener.");
   return `http://127.0.0.1:${address.port}/mcp`;
@@ -63,6 +69,7 @@ async function postMcp(url: string, method: "tools/list" | "tools/call", id: num
     headers: {
       Accept: "application/json, text/event-stream",
       "Content-Type": "application/json",
+      Connection: "close",
       "MCP-Protocol-Version": protocolVersion,
       "MCP-Method": method,
       ...(name ? { "MCP-Name": name } : {}),
