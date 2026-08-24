@@ -1,0 +1,27 @@
+{
+  "name": "context7-key-rotator-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A stateless HTTP MCP server for Context7 V2 with balanced API-key rotation.",
+  "type": "module",
+  "engines": {
+    "node": ">=20.18.1"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/node": "2.0.0",
+    "@modelcontextprotocol/server": "2.0.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "7.0.2",
+    "vitest": "4.1.11"
+  }
+}
