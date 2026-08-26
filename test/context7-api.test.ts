@@ -78,7 +78,7 @@ describe("Context7ApiClient", () => {
 
 describe("RoundRobinKeyPool.fromEnvironment", () => {
   it.each([
-    ["missing value", undefined],
+    ["empty value", ""],
     ["one key", "one"],
     ["three keys", "one,two,three"],
   ])("rejects %s", (_scenario, value) => {
