@@ -34,18 +34,33 @@ describe("Context7ApiClient", () => {
     ]);
   });
 
-  it("retries the other key once when the selected key is blocked", async () => {
+  it.each([401, 403, 429])("retries exactly once with the alternate key for blocked status %i", async (status) => {
     const mock = fakeFetch([
-      () => new Response("quota exhausted", { status: 429 }),
+      () => new Response("blocked", { status }),
       () => new Response("focused context", { status: 200 }),
     ]);
     const client = new Context7ApiClient(new RoundRobinKeyPool(["one", "two"]), mock.fetch);
 
     await expect(client.fetchLibraryContext("control plane", "/siderolabs/talos")).resolves.toBe("focused context");
+
     expect(mock.authorizations).toEqual(["Bearer one", "Bearer two"]);
     expect(mock.urls).toEqual([
       "https://context7.com/api/v2/context?query=control+plane&libraryId=%2Fsiderolabs%2Ftalos",
       "https://context7.com/api/v2/context?query=control+plane&libraryId=%2Fsiderolabs%2Ftalos",
+    ]);
+  });
+
+  it("does not retry a non-blocked upstream failure", async () => {
+    const mock = fakeFetch([
+      () => new Response("upstream error", { status: 500 }),
+    ]);
+    const client = new Context7ApiClient(new RoundRobinKeyPool(["one", "two"]), mock.fetch);
+
+    await expect(client.searchLibraries("docs", "FastMCP")).rejects.toBeInstanceOf(Context7ApiError);
+
+    expect(mock.authorizations).toEqual(["Bearer one"]);
+    expect(mock.urls).toEqual([
+      "https://context7.com/api/v2/libs/search?query=docs&libraryName=FastMCP",
     ]);
   });
 
@@ -58,5 +73,24 @@ describe("Context7ApiClient", () => {
 
     await expect(client.searchLibraries("docs", "FastMCP")).rejects.toBeInstanceOf(Context7ApiError);
     expect(mock.authorizations).toEqual(["Bearer one", "Bearer two"]);
+  });
+});
+
+describe("RoundRobinKeyPool.fromEnvironment", () => {
+  it.each([
+    ["empty value", ""],
+    ["one key", "one"],
+    ["three keys", "one,two,three"],
+  ])("rejects %s", (_scenario, value) => {
+    expect(() => RoundRobinKeyPool.fromEnvironment(value)).toThrow(
+      "CONTEXT7_API_KEYS must contain exactly two non-empty keys.",
+    );
+  });
+
+  it("accepts exactly two comma-separated keys", () => {
+    const pool = RoundRobinKeyPool.fromEnvironment(" one , two ");
+
+    expect(pool.next()).toEqual({ index: 0, value: "one" });
+    expect(pool.next()).toEqual({ index: 1, value: "two" });
   });
 });

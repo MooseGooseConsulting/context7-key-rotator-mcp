@@ -28,3 +28,15 @@ npm run build
 ```
 
 The tests mock Context7 V2 and cover normal alternation, retrying the other key after a blocked response, failure when both keys are blocked, and the native-compatible result formatter.
+
+## Container deployment
+
+The checked-in `Dockerfile` and `deploy/compose.yaml` run the service as a non-root,
+read-only container. The Compose file expects the secret environment file at
+`/etc/context7-key-rotator-mcp/context7.env` and binds the MCP endpoint to guest
+loopback port `23007` (`POST /mcp`); expose it through an authenticated proxy before
+making it reachable from another network.
+
+```bash
+docker compose -f deploy/compose.yaml up -d --build
+```

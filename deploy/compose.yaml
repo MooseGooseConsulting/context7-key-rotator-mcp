@@ -1,0 +1,22 @@
+services:
+  context7-key-rotator:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: context7-key-rotator-mcp
+    restart: unless-stopped
+    env_file:
+      - /etc/context7-key-rotator-mcp/context7.env
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+    ports:
+      - "127.0.0.1:23007:3000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
