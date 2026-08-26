@@ -1,0 +1,11 @@
+.git
+.github
+.workflow
+node_modules
+dist
+test
+coverage
+Dockerfile
+.dockerignore
+.env
+.env.*
