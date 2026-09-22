@@ -46,21 +46,27 @@ export class Context7ApiError extends Error {
 
 export type FetchLike = typeof fetch;
 
-function normalizeName(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
-}
-
 /**
- * True when at least one result plausibly names the requested library. A key
- * whose teamspace filters hide the library still answers 200, but with only
- * unrelated libraries.
+ * Merges search responses from different keys in slot order. Results are
+ * interleaved by rank and de-duplicated by library ID, so a library visible to
+ * either key's teamspace appears no matter which key's turn it is. The merged
+ * response only reports a filter when every contributing key applied one.
  */
-export function hasLibraryNameMatch(response: SearchResponse, libraryName: string): boolean {
-  const wanted = normalizeName(libraryName);
-  if (!wanted) return true;
-  return (response.results ?? []).some((result) =>
-    normalizeName(result.title ?? "").includes(wanted) || normalizeName(result.id ?? "").includes(wanted),
-  );
+export function mergeSearchResponses(responses: readonly SearchResponse[]): SearchResponse {
+  const lists = responses.map((response) => response.results ?? []);
+  const longest = Math.max(0, ...lists.map((list) => list.length));
+  const seen = new Set<string>();
+  const results: SearchResult[] = [];
+  for (let rank = 0; rank < longest; rank += 1) {
+    for (const list of lists) {
+      const result = list[rank];
+      if (result && !seen.has(result.id)) {
+        seen.add(result.id);
+        results.push(result);
+      }
+    }
+  }
+  return { results, searchFilterApplied: responses.length > 0 && responses.every((response) => response.searchFilterApplied) };
 }
 
 export function parseRetryAfterMs(value: string | null, now: number): number | undefined {
@@ -82,10 +88,7 @@ export class Context7ApiClient {
     const url = new URL(`${API_BASE_URL}/v2/libs/search`);
     url.searchParams.set("query", query);
     url.searchParams.set("libraryName", libraryName);
-    return this.withBalancedKey(
-      async (key) => (await this.fetchResponse(url, key)).json() as Promise<SearchResponse>,
-      (response) => !response.searchFilterApplied || hasLibraryNameMatch(response, libraryName),
-    );
+    return this.withEveryKey(async (key) => (await this.fetchResponse(url, key)).json() as Promise<SearchResponse>);
   }
 
   public async fetchLibraryContext(query: string, libraryId: string): Promise<string> {
@@ -99,40 +102,54 @@ export class Context7ApiClient {
   }
 
   /**
-   * Runs the operation on the next key and at most once more on the other key:
-   * when the first key is blocked or reports "not found", or when its answer is
-   * not acceptable (for example, filtered search results that miss the requested
-   * library). An unacceptable first answer is still returned if the other key
-   * cannot do better.
+   * Searches with every key that is not cooling down, in parallel, and merges
+   * the answers, so what a caller sees does not depend on whose turn it is when
+   * the keys' teamspaces filter libraries differently. Keys skipped for a
+   * cooldown are tried only if every available key failed.
    */
-  private async withBalancedKey<T>(
-    operation: (key: string) => Promise<T>,
-    acceptable: (result: T) => boolean = () => true,
-  ): Promise<T> {
+  private async withEveryKey(operation: (key: string) => Promise<SearchResponse>): Promise<SearchResponse> {
+    const leases = this.keyPool.leases();
+    const available = leases.filter((lease) => !this.keyPool.isCoolingDown(lease.index));
+    const cooling = leases.filter((lease) => this.keyPool.isCoolingDown(lease.index));
+    const answered: Array<{ lease: KeyLease; response: SearchResponse }> = [];
+    const failures: unknown[] = [];
+
+    for (const batch of available.length ? [available, cooling] : [cooling]) {
+      const settled = await Promise.allSettled(batch.map((lease) => this.attempt(lease, operation)));
+      settled.forEach((outcome, position) => {
+        if (outcome.status === "fulfilled") answered.push({ lease: batch[position], response: outcome.value });
+        else failures.push(outcome.reason);
+      });
+      if (answered.length) break;
+    }
+
+    if (!answered.length) throw failures[0];
+    if (answered.length > 1) this.logSearchDivergence(answered);
+    return mergeSearchResponses(answered.map(({ response }) => response));
+  }
+
+  private logSearchDivergence(answered: ReadonlyArray<{ lease: KeyLease; response: SearchResponse }>): void {
+    const ids = answered.map(({ response }) => new Set((response.results ?? []).map((result) => result.id)));
+    const unique = ids.map((own, position) => [...own].filter((id) => ids.every((other, index) => index === position || !other.has(id))).length);
+    if (unique.every((count) => count === 0)) return;
+    this.log(`Context7 search results differ by slot: ${answered.map(({ lease }, position) => `slot ${lease.index} alone returned ${unique[position]}`).join(", ")}`);
+  }
+
+  /**
+   * Runs the operation on the next key and at most once more on the other key
+   * when the first key is blocked or reports "not found".
+   */
+  private async withBalancedKey<T>(operation: (key: string) => Promise<T>): Promise<T> {
     const selected = this.keyPool.next();
     const alternate = this.keyPool.alternate(selected);
-
-    let first: T;
     try {
-      first = await this.attempt(selected, operation);
+      return await this.attempt(selected, operation);
     } catch (error) {
       if (!(error instanceof Context7ApiError) || !(error.isBlocked || error.isNotFound)) {
         throw error;
       }
       this.log(`Context7 slot ${selected.index} returned ${error.status}; retrying on slot ${alternate.index}`);
       return this.attempt(alternate, operation);
-    }
-
-    if (acceptable(first)) return first;
-
-    try {
-      const second = await this.attempt(alternate, operation);
-      const better = acceptable(second);
-      this.log(`Context7 slot ${selected.index} filtered search missed the requested library; slot ${alternate.index} ${better ? "matched" : "did not match either"}`);
-      return better ? second : first;
-    } catch (error) {
-      this.log(`Context7 slot ${selected.index} filtered search missed the requested library; slot ${alternate.index} failed: ${error instanceof Error ? error.message : String(error)}`);
-      return first;
     }
   }
 
