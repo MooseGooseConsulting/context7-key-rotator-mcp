@@ -10,10 +10,15 @@ on:
       - main
   pull_request:
     paths:
+      # Every input the image build reads: the Dockerfile, what .dockerignore
+      # leaves it, the manifest that feeds npm ci, and the sources it copies.
       - .github/workflows/publish.yml
       - Dockerfile
+      - .dockerignore
       - package.json
       - package-lock.json
+      - tsconfig.json
+      - src/**
   workflow_dispatch:
 
 permissions:
@@ -89,8 +94,10 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
-          # `main` is the moving pointer; `main-<commit>` names one build of one
-          # commit forever. Deployments pin a digest taken from the run summary.
+          # `main` is the moving pointer; `main-<commit>` is the per-commit tag,
+          # which a re-run for the same commit rebuilds and repoints like any
+          # other tag. Deployments pin a digest taken from the run summary, and a
+          # digest never moves.
           tags: |
             type=raw,value=main
             type=sha,format=long,prefix=main-
