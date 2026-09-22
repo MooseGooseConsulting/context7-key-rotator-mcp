@@ -118,9 +118,13 @@ jobs:
       - name: Record the published digest
         run: |
           set -euo pipefail
+          # The repository path carries the org's capitalisation, which Docker
+          # rejects in a reference; docker/metadata-action lowercases the tags it
+          # builds, so the raw commands here have to match that.
+          image="$(printf '%s' "$IMAGE" | tr '[:upper:]' '[:lower:]')"
           # Deployments pin this digest, so it is the one fact worth carrying out
           # of the run: a tag can be repointed, a digest cannot.
-          digest="$(docker buildx imagetools inspect "${IMAGE}:main-${GITHUB_SHA}" --format '{{json .Manifest.Digest}}')"
+          digest="$(docker buildx imagetools inspect "${image}:main-${GITHUB_SHA}" --format '{{json .Manifest.Digest}}')"
           digest="${digest//\"/}"
           {
             echo "### Image published"
@@ -130,7 +134,7 @@ jobs:
             echo "- Digest: \`${digest}\`"
             echo
             echo "\`\`\`"
-            echo "${IMAGE}@${digest}"
+            echo "${image}@${digest}"
             echo "\`\`\`"
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "Published ${IMAGE}@${digest}"
+          echo "Published ${image}@${digest}"
