@@ -15,7 +15,7 @@ It is published as the tailnet service `svc:context7` and is reachable only from
 
 ## How rotation works
 
-`CONTEXT7_API_KEYS` must contain exactly two comma-separated keys. A process starts with slot 0, then selects slot 1, then slot 0 again for successive upstream operations. The counter is process-local and is reset when the container restarts.
+`CONTEXT7_API_KEYS` must contain exactly two comma-separated keys. A process starts with slot 0, then selects slot 1, then slot 0 again for successive upstream operations. If the selected slot is cooling down after a `429` and the other slot is not, the other slot is used instead. The counter and cooldowns are process-local and are reset when the container restarts.
 
 `tools/list` is local MCP metadata: it never calls Context7 and never advances the key selector. Each `resolve-library-id` or `query-docs` call makes one logical Context7 operation.
 
@@ -23,23 +23,39 @@ It is published as the tailnet service `svc:context7` and is reachable only from
 flowchart TD
     A[Client calls resolve-library-id or query-docs] --> B[Validate MCP arguments]
     B --> C[Select next key slot]
-    C --> D[Advance ordinary round-robin pointer]
+    C --> D[Advance ordinary round-robin pointer; skip a cooling slot]
     D --> E[Call Context7 V2 API]
     E -->|200 OK| F[Return MCP tool result]
-    E -->|401, 403, or 429| G[Retry once with other slot]
+    E -->|401, 403, 404, or 429| G[Retry once with other slot]
+    E -->|Filtered search misses the library| G
     G -->|200 OK| F
-    G -->|401, 403, or 429| H[Return MCP tool error]
+    G -->|401, 403, 404, or 429| H[Return MCP tool error]
     E -->|Other HTTP error, timeout, or network error| H
 ```
 
 The fallback does **not** advance the ordinary round-robin pointer a second time. For example, if slot 0 returns `429` and slot 1 succeeds, the next logical operation still begins on slot 1. This means an exhausted slot adds retry latency to the requests selected for it, but it does not make those requests fail while the alternate slot works.
 
-Only `401`, `403`, and `429` cause an alternate-key retry. A `500`, malformed upstream response, network failure, or timeout is returned as a tool error without a retry because it is not evidence that the selected key is the problem.
+Only `401`, `403`, `404`, and `429` cause an alternate-key retry. A `500`, malformed upstream response, network failure, or timeout is returned as a tool error without a retry because it is not evidence that the selected key is the problem.
+
+### Keys with different library filters
+
+Each Context7 key belongs to a teamspace whose [library filters](https://context7.com/dashboard?tab=policies) decide which libraries it can see. A hidden library is left out of search results and answers documentation requests with the same `404` as a library that does not exist. If the two keys belong to teamspaces with different filters, the same call can succeed on one slot and come back empty or unrelated on the other.
+
+The rotator hides that difference instead of alternating between good and bad answers:
+
+- A `query-docs` call that gets `404` is retried once on the other slot.
+- A `resolve-library-id` call whose response is marked `searchFilterApplied` and contains no result whose title or ID includes the requested library name is repeated once on the other slot. The other slot's answer is returned only if it does name the library; otherwise the first answer is returned. An unfiltered response or one that already names the library is returned without a second call.
+
+The durable fix is to give both teamspaces the same library filters. The fallback costs one extra upstream call for each affected lookup until then.
+
+### Rate-limit cooldown
+
+A `429` puts that slot into a cooldown for the `Retry-After` period Context7 sends (delta seconds or an HTTP date), or 60 seconds when the header is missing, capped at one hour. Ordinary selection skips a cooling slot while the other slot is available, so an exhausted key no longer adds retry latency to half of all calls. If both slots are cooling, ordinary rotation continues, and the fallback is still tried.
 
 ## Boundaries and limitations
 
 - Each upstream attempt has a 60-second timeout. A blocked response that arrives before that timeout may be followed by one alternate attempt, so one logical tool call can take up to roughly two upstream timeout windows. There is no unbounded wait for an upstream request.
-- The service intentionally has no key cooldown, key scoring, session affinity, persistent state, OAuth flow, CLI adapter, or proxy cache. It is a two-key round-robin retry layer, not a quota manager.
+- The service intentionally has no key scoring, session affinity, persistent state, OAuth flow, CLI adapter, or proxy cache. Its only per-key state is the in-memory `429` cooldown. It is a two-key round-robin retry layer, not a quota manager.
 - A container restart resets selection to slot 0. This is expected and does not alter the configured keys.
 - There is no upstream-aware health endpoint. A running container proves only that the MCP server process is listening; prove Context7 availability with a real tool call.
 - If both slots return a blocked status, the MCP call returns a normal tool error. It does not crash the server.
@@ -104,6 +120,6 @@ npm run build
 docker compose -f deploy/compose.yaml up -d --build
 ```
 
-The automated suite is deterministic: it mocks Context7 V2 responses and verifies MCP protocol handling, tool discovery, result formatting, normal alternation, alternate-key retry for `401`/`403`/`429`, both-key failure, and integration-test server lifecycle. Green automated tests do **not** prove the current upstream service or credentials work.
+The automated suite is deterministic: it mocks Context7 V2 responses and verifies MCP protocol handling, tool discovery, result formatting, normal alternation, alternate-key retry for `401`/`403`/`404`/`429`, the filtered-search fallback, `Retry-After` cooldowns, both-key failure, and integration-test server lifecycle. Green automated tests do **not** prove the current upstream service or credentials work.
 
 Live validation is separate. Use a real client or a protocol client to verify `tools/list`, then call `resolve-library-id` and `query-docs` with a real library. A valid result has an actual Context7 library ID, nonempty documentation, and source links or code/documentation content appropriate to the request.
