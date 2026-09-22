@@ -67,7 +67,9 @@ jobs:
 
   publish:
     name: Build and publish the image
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    # A dispatch from any other ref would repoint `main` at a commit that is not
+    # on main, so only main can publish it.
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
