@@ -8,10 +8,10 @@ A small remote [Model Context Protocol](https://modelcontextprotocol.io/) server
 The deployed endpoint is:
 
 ```
-https://bloodarrow.tyrannosaurus-magellanic.ts.net/mcp
+https://context7.tyrannosaurus-magellanic.ts.net/mcp
 ```
 
-It is private to the Tailscale tailnet. Clients authenticate to the network boundary; they do not receive or store a Context7 key.
+It is published as the tailnet service `svc:context7` and is reachable only from inside the tailnet. Clients authenticate to the network boundary; they do not receive or store a Context7 key.
 
 ## How rotation works
 
@@ -46,31 +46,14 @@ Only `401`, `403`, and `429` cause an alternate-key retry. A `500`, malformed up
 
 ## Deployment topology
 
-The production checkout lives on the **physical Bloodarrow host** at `/opt/context7-key-rotator-mcp`, not in the `vast-ubuntu` guest. Docker Compose builds the repository image and binds it only to physical-host loopback:
+Production runs on the **homelab cluster** (Talos, reconciled by Flux) as one Deployment with two containers:
 
-```
-127.0.0.1:23007 -> container:3000 -> POST /mcp
-```
+- `rotator` — the image published by `.github/workflows/publish.yml`, pinned by digest.
+- `tailscale` — the stock `tailscale/tailscale` image running Tailscale Serve in userspace. It joins the tailnet as an ephemeral node, advertises `svc:context7`, and forwards `tcp:443` to `http://127.0.0.1:3000` over the pod's shared loopback.
 
-Tailscale Serve publishes that loopback backend to the tailnet HTTPS endpoint above. There is no LAN, raw-Tailscale-IP, Funnel, or public exposure of port `23007`.
+Secrets reach the pod as ExternalSecrets sourced from Doppler. Nothing here or in the manifests holds a secret. Clients see the single stable name above; the workload moves by moving the pod.
 
-The Compose configuration expects a root-owned `0600` environment file at:
-
-```
-/etc/context7-key-rotator-mcp/context7.env
-```
-
-That file contains `CONTEXT7_API_KEYS` and is not part of this repository. Inject or update it through the existing secret-management path; never commit, print, or put either key into client configuration.
-
-To rebuild the physical-host deployment after an approved repository update:
-
-```bash
-cd /opt/context7-key-rotator-mcp
-git pull --ff-only
-docker compose -f deploy/compose.yaml up -d --build
-```
-
-The checked-in container runs as the non-root `node` user with a read-only root filesystem, a temporary `/tmp`, dropped Linux capabilities, and `no-new-privileges`.
+The rotator previously ran on the physical Bloodarrow host from a checkout at `/opt/context7-key-rotator-mcp`, with Tailscale Serve on that host publishing loopback. That stack is retired once the cluster endpoint is cut over and verified; `docker compose -f deploy/compose.yaml up -d --build` on Bloodarrow restores the old endpoint as a rollback.
 
 ## Client registration
 
@@ -102,8 +85,10 @@ For Codex, the active registration was replaced using its native CLI:
 
 ```powershell
 codex mcp remove context7
-codex mcp add context7 --url https://bloodarrow.tyrannosaurus-magellanic.ts.net/mcp
+codex mcp add context7 --url https://context7.tyrannosaurus-magellanic.ts.net/mcp
 ```
+
+Clients registered against the old Bloodarrow URL keep working until that stack is drained; repoint each one at the URL above when it next needs a change.
 
 ## Local development and validation
 
@@ -111,6 +96,12 @@ codex mcp add context7 --url https://bloodarrow.tyrannosaurus-magellanic.ts.net/
 npm ci
 npm test
 npm run build
+```
+
+`deploy/compose.yaml` is the local container path: it builds the repository `Dockerfile`, binds the container to physical-host loopback only, and reads `CONTEXT7_API_KEYS` from a root-owned `0600` file at `/etc/context7-key-rotator-mcp/context7.env`, which is not part of this repository.
+
+```bash
+docker compose -f deploy/compose.yaml up -d --build
 ```
 
 The automated suite is deterministic: it mocks Context7 V2 responses and verifies MCP protocol handling, tool discovery, result formatting, normal alternation, alternate-key retry for `401`/`403`/`429`, both-key failure, and integration-test server lifecycle. Green automated tests do **not** prove the current upstream service or credentials work.

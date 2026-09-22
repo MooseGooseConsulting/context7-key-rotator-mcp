@@ -1,0 +1,136 @@
+name: Publish image
+
+# The image this repository deploys is built here and nowhere else. The
+# homelab cluster pulls it from GHCR by digest; the compose file in deploy/ is
+# for local development only.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    paths:
+      - .github/workflows/publish.yml
+      - Dockerfile
+      - package.json
+      - package-lock.json
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-image-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  validate:
+    name: Validate the image build
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=main
+            type=sha,format=long,prefix=main-
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=main-${{ github.sha }}
+
+      - name: Build the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=context7-key-rotator-mcp
+          cache-to: type=gha,mode=max,scope=context7-key-rotator-mcp
+
+  publish:
+    name: Build and publish the image
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          # `main` is the moving pointer; `main-<commit>` names one build of one
+          # commit forever. Deployments pin a digest taken from the run summary.
+          tags: |
+            type=raw,value=main
+            type=sha,format=long,prefix=main-
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=main-${{ github.sha }}
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=context7-key-rotator-mcp
+          cache-to: type=gha,mode=max,scope=context7-key-rotator-mcp
+
+      - name: Record the published digest
+        run: |
+          set -euo pipefail
+          # Deployments pin this digest, so it is the one fact worth carrying out
+          # of the run: a tag can be repointed, a digest cannot.
+          digest="$(docker buildx imagetools inspect "${IMAGE}:main-${GITHUB_SHA}" --format '{{json .Manifest.Digest}}')"
+          digest="${digest//\"/}"
+          {
+            echo "### Image published"
+            echo
+            echo "- Commit: \`${GITHUB_SHA}\`"
+            echo "- Tags: \`main\`, \`main-${GITHUB_SHA}\`"
+            echo "- Digest: \`${digest}\`"
+            echo
+            echo "\`\`\`"
+            echo "${IMAGE}@${digest}"
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Published ${IMAGE}@${digest}"
