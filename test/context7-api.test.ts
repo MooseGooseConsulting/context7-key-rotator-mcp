@@ -237,3 +237,26 @@ describe("parseRetryAfterMs", () => {
     expect(parseRetryAfterMs(null, now)).toBeUndefined();
   });
 });
+
+describe("Context7ApiClient slot logging", () => {
+  it("logs slot indexes and reasons without key values", async () => {
+    const lines: string[] = [];
+    const mock = fakeFetch([
+      () => new Response("rate limited", { status: 429, headers: { "Retry-After": "5" } }),
+      () => new Response("docs", { status: 200 }),
+      () => Response.json(unrelated),
+      () => Response.json(matching),
+    ]);
+    const client = new Context7ApiClient(new RoundRobinKeyPool(["secret-one", "secret-two"]), mock.fetch, (line) => lines.push(line));
+
+    await client.fetchLibraryContext("q", "/a/b");
+    await client.searchLibraries("docs", "Context7");
+
+    expect(lines).toEqual([
+      "Context7 slot 0 rate limited; cooling down for 5s",
+      "Context7 slot 0 returned 429; retrying on slot 1",
+      "Context7 slot 1 filtered search missed the requested library; slot 0 matched",
+    ]);
+    expect(lines.join("\n")).not.toContain("secret");
+  });
+});

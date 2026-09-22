@@ -48,6 +48,8 @@ The rotator hides that difference instead of alternating between good and bad an
 
 The durable fix is to give both teamspaces the same library filters. The fallback costs one extra upstream call for each affected lookup until then.
 
+Each fallback and cooldown writes one line to stderr naming the slot index and the reason (for example `Context7 slot 1 filtered search missed the requested library; slot 0 matched`), never the key. Those lines identify which slot's teamspace filters are stricter.
+
 ### Rate-limit cooldown
 
 A `429` puts that slot into a cooldown for the `Retry-After` period Context7 sends (delta seconds or an HTTP date), or 60 seconds when the header is missing, capped at one hour. Ordinary selection skips a cooling slot while the other slot is available, so an exhausted key no longer adds retry latency to half of all calls. If both slots are cooling, ordinary rotation continues, and the fallback is still tried.

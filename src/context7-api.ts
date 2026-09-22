@@ -75,6 +75,7 @@ export class Context7ApiClient {
   public constructor(
     private readonly keyPool: RoundRobinKeyPool,
     private readonly fetchImpl: FetchLike = fetch,
+    private readonly log: (message: string) => void = (message) => console.error(message),
   ) {}
 
   public async searchLibraries(query: string, libraryName: string): Promise<SearchResponse> {
@@ -118,6 +119,7 @@ export class Context7ApiClient {
       if (!(error instanceof Context7ApiError) || !(error.isBlocked || error.isNotFound)) {
         throw error;
       }
+      this.log(`Context7 slot ${selected.index} returned ${error.status}; retrying on slot ${alternate.index}`);
       return this.attempt(alternate, operation);
     }
 
@@ -125,8 +127,11 @@ export class Context7ApiClient {
 
     try {
       const second = await this.attempt(alternate, operation);
-      return acceptable(second) ? second : first;
-    } catch {
+      const better = acceptable(second);
+      this.log(`Context7 slot ${selected.index} filtered search missed the requested library; slot ${alternate.index} ${better ? "matched" : "did not match either"}`);
+      return better ? second : first;
+    } catch (error) {
+      this.log(`Context7 slot ${selected.index} filtered search missed the requested library; slot ${alternate.index} failed: ${error instanceof Error ? error.message : String(error)}`);
       return first;
     }
   }
@@ -136,8 +141,9 @@ export class Context7ApiClient {
       return await operation(lease.value);
     } catch (error) {
       if (error instanceof Context7ApiError && error.status === 429) {
-        const cooldown = error.retryAfterMs ?? DEFAULT_RATE_LIMIT_COOLDOWN_MS;
-        this.keyPool.coolDown(lease, Math.min(cooldown, MAX_RATE_LIMIT_COOLDOWN_MS));
+        const cooldown = Math.min(error.retryAfterMs ?? DEFAULT_RATE_LIMIT_COOLDOWN_MS, MAX_RATE_LIMIT_COOLDOWN_MS);
+        this.keyPool.coolDown(lease, cooldown);
+        this.log(`Context7 slot ${lease.index} rate limited; cooling down for ${Math.ceil(cooldown / 1000)}s`);
       }
       throw error;
     }
