@@ -23,7 +23,7 @@ function toolError(error: unknown) {
 export function createContext7McpServer(api: Context7ApiClient): McpServer {
   const server = new McpServer({
     name: "Context7 Key Rotator",
-    version: "0.1.0",
+    version: process.env.ROTATOR_VERSION || "0.1.0",
     websiteUrl: "https://context7.com",
     description: "Context7 V2 documentation lookup with balanced upstream API keys.",
   });
