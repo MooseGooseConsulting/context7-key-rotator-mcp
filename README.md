@@ -57,7 +57,7 @@ The rotator previously ran on the physical Bloodarrow host from a checkout at `/
 
 ## Client registration
 
-Every installed native client uses one remote server named `context7`, pointing to the HTTPS endpoint above. The active registrations contain no bearer headers, API keys, stdio bridge, or direct `context7.com` MCP URL.
+Every installed native client uses one remote server named `context7`, whose target is the HTTPS endpoint above. The active registrations contain no bearer headers, API keys, stdio bridge, or direct `context7.com` MCP URL.
 
 | Client | Active registration |
 | --- | --- |
