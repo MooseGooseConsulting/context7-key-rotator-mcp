@@ -68,6 +68,14 @@ Production runs on the **homelab cluster** (Talos, reconciled by Flux) as one De
 - `rotator` — the image published by `.github/workflows/publish.yml`, pinned by digest.
 - `tailscale` — the stock `tailscale/tailscale` image running Tailscale Serve in userspace. It joins the tailnet as an ephemeral node, advertises `svc:context7`, and forwards `tcp:443` to `http://127.0.0.1:3000` over the pod's shared loopback.
 
+A merge to `main` deploys itself:
+
+1. `.github/workflows/publish.yml` pushes the image with the tags `main`, `main-<commit>`, and a sortable build tag `main-<UTC date>-<short sha>-<run>.<attempt>`. The build tag is also the MCP `serverInfo.version` the server reports.
+2. Flux image automation in `MooseGooseConsulting/homelab-next` (`clusters/homelab/context7-image-automation.yaml`) scans GHCR every 5 minutes, picks the newest build tag, and rewrites the pinned tag and digest in `cluster/apps/context7-key-rotator.yaml` on the branch `flux-image-updates-context7`.
+3. That repository's `context7-image-deploy` workflow opens a pull request for the branch and squash-merges it; the organization requires a pull request for every change to `main`. Flux then rolls the Deployment.
+
+Expect a new build to be serving within about 15 minutes of the merge. To confirm, call `initialize` on the endpoint and compare `serverInfo.version` with the build tag in the publish run's summary.
+
 Secrets reach the pod as ExternalSecrets sourced from Doppler. Nothing here or in the manifests holds a secret. Clients see the single stable name above; the workload moves by moving the pod.
 
 The rotator previously ran on the physical Bloodarrow host from a checkout at `/opt/context7-key-rotator-mcp`, where Tailscale Serve on the host published `https://bloodarrow.tyrannosaurus-magellanic.ts.net/mcp` from the compose loopback port `127.0.0.1:23007`. That stack is retired once the cluster endpoint is cut over and verified. Rolling it back takes both halves of it, because compose republishes nothing on its own: `docker compose -f deploy/compose.yaml up -d --build` with the checkout still on the commit that was live when the stack was drained, and the host's Serve stanza put back.

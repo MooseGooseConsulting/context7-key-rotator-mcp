@@ -46,6 +46,13 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Name this build
+        id: version
+        # One sortable tag per build, main-<UTC date>-<short sha>-<run>.<attempt>.
+        # The homelab ImagePolicy orders on the run number and attempt to pick the
+        # newest build, and the server reports it as its MCP serverInfo version.
+        run: echo "tag=main-$(date -u +%Y%m%d)-${GITHUB_SHA::7}-${{ github.run_number }}.${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
+
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -54,6 +61,7 @@ jobs:
           tags: |
             type=raw,value=main
             type=sha,format=long,prefix=main-
+            type=raw,value=${{ steps.version.outputs.tag }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -67,6 +75,7 @@ jobs:
           push: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: ROTATOR_VERSION=${{ steps.version.outputs.tag }}
           cache-from: type=gha,scope=context7-key-rotator-mcp
           cache-to: type=gha,mode=max,scope=context7-key-rotator-mcp
 
@@ -89,6 +98,13 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Name this build
+        id: version
+        # One sortable tag per build, main-<UTC date>-<short sha>-<run>.<attempt>.
+        # The homelab ImagePolicy orders on the run number and attempt to pick the
+        # newest build, and the server reports it as its MCP serverInfo version.
+        run: echo "tag=main-$(date -u +%Y%m%d)-${GITHUB_SHA::7}-${{ github.run_number }}.${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
+
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -96,11 +112,13 @@ jobs:
           images: ${{ env.IMAGE }}
           # `main` is the moving pointer; `main-<commit>` is the per-commit tag,
           # which a re-run for the same commit rebuilds and repoints like any
-          # other tag. Deployments pin a digest taken from the run summary, and a
-          # digest never moves.
+          # other tag. The sortable build tag is what the homelab cluster's Flux
+          # image automation follows; it writes that tag's digest into the
+          # deployment, and a digest never moves.
           tags: |
             type=raw,value=main
             type=sha,format=long,prefix=main-
+            type=raw,value=${{ steps.version.outputs.tag }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -121,10 +139,13 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: ROTATOR_VERSION=${{ steps.version.outputs.tag }}
           cache-from: type=gha,scope=context7-key-rotator-mcp
           cache-to: type=gha,mode=max,scope=context7-key-rotator-mcp
 
       - name: Record the published digest
+        env:
+          BUILD_TAG: ${{ steps.version.outputs.tag }}
         run: |
           set -euo pipefail
           # The repository path carries the org's capitalisation, which Docker
@@ -139,7 +160,7 @@ jobs:
             echo "### Image published"
             echo
             echo "- Commit: \`${GITHUB_SHA}\`"
-            echo "- Tags: \`main\`, \`main-${GITHUB_SHA}\`"
+            echo "- Tags: \`main\`, \`main-${GITHUB_SHA}\`, \`${BUILD_TAG}\`"
             echo "- Digest: \`${digest}\`"
             echo
             echo "\`\`\`"
