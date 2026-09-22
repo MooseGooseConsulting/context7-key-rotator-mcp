@@ -53,7 +53,7 @@ Production runs on the **homelab cluster** (Talos, reconciled by Flux) as one De
 
 Secrets reach the pod as ExternalSecrets sourced from Doppler. Nothing here or in the manifests holds a secret. Clients see the single stable name above; the workload moves by moving the pod.
 
-The rotator previously ran on the physical Bloodarrow host from a checkout at `/opt/context7-key-rotator-mcp`, with Tailscale Serve on that host publishing loopback. That stack is retired once the cluster endpoint is cut over and verified; `docker compose -f deploy/compose.yaml up -d --build` on Bloodarrow restores the old endpoint as a rollback.
+The rotator previously ran on the physical Bloodarrow host from a checkout at `/opt/context7-key-rotator-mcp`, where Tailscale Serve on the host published `https://bloodarrow.tyrannosaurus-magellanic.ts.net/mcp` from the compose loopback port `127.0.0.1:23007`. That stack is retired once the cluster endpoint is cut over and verified. Rolling it back takes both halves of it, because compose republishes nothing on its own: `docker compose -f deploy/compose.yaml up -d --build` with the checkout still on the commit that was live when the stack was drained, and the host's Serve stanza put back.
 
 ## Client registration
 
