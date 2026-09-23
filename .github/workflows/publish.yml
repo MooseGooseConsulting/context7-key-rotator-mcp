@@ -35,7 +35,10 @@ jobs:
   validate:
     name: Validate the image build
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    # The self-hosted scale set, except for a pull request from a fork: this
+    # repository is public, and a fork's code should not run on the homelab.
+    # CI_FORCE_HOSTED is the org-wide switch back to GitHub-hosted runners.
+    runs-on: ${{ (github.event.pull_request.head.repo.fork || vars.CI_FORCE_HOSTED == 'true') && 'ubuntu-latest' || 'moosegoose-linux' }}
     timeout-minutes: 20
     steps:
       - name: Check out the repository
@@ -84,7 +87,9 @@ jobs:
     # A dispatch from any other ref would repoint `main` at a commit that is not
     # on main, so only main can publish it.
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
-    runs-on: ubuntu-latest
+    # Only main reaches this job, so no fork code runs here. The runner has a
+    # Docker daemon (a dind sidecar), which buildx needs.
+    runs-on: ${{ vars.CI_FORCE_HOSTED == 'true' && 'ubuntu-latest' || 'moosegoose-linux' }}
     timeout-minutes: 30
     permissions:
       contents: read
