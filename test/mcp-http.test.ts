@@ -140,7 +140,7 @@ describe("Streamable HTTP MCP endpoint", () => {
     expect(events[0].attempts.map((attempt: Record<string, unknown>) => attempt.slot)).toEqual([0, 1]);
     expect(events[0].attempts[0]).toMatchObject({ endpoint: "search", status: 200, rateLimitLimit: 1000, rateLimitRemaining: 570 });
     expect(events[1]).toMatchObject({
-      tool: "query-docs", libraryId: "/a/b", outcome: "error", errorStatus: 404, errorCode: "no_relevant_snippets", upstreamCalls: 1,
+      tool: "query-docs", libraryId: "/a/b", outcome: "error", errorStatus: 404, errorCode: "no_relevant_snippets", errorMessage: "No documentation matched.", upstreamCalls: 1,
     });
     expect(events[1].attempts[0]).toMatchObject({ endpoint: "context", status: 404, code: "no_relevant_snippets" });
     expect(events[0].requestId).not.toBe(events[1].requestId);

@@ -44,7 +44,7 @@ The rotator makes the answer independent of whose turn it is:
 
 - `resolve-library-id` searches with both slots in parallel and merges the results: interleaved by rank in slot order and de-duplicated by library ID. Every call sees every library that either teamspace allows. The filter note is shown only if both slots applied a filter. A slot that is cooling down is skipped, and is asked only if every available slot fails. If one slot fails, the other slot's results are returned alone.
 - `query-docs` stays round-robin. A hidden library announces itself with `403 access_denied` or `404 library_not_found`, and those are retried once on the other slot. `404 no_relevant_snippets` means the library exists but nothing matched the query; either key would answer it the same way, so it is returned without a retry.
-- A `301 library_redirected` carries the new library ID in its JSON `redirectUrl` field and no `Location` header. `query-docs` follows it once and starts its answer with a note naming the new ID (for example `/facebook/react` now answers from `/react/react`). A `redirectUrl` that is not a library ID (`/owner/project`, or a full URL with that path) is not followed, and the `301` is returned as an error.
+- A `301 library_redirected` carries the new library ID in its JSON `redirectUrl` field and no `Location` header. `query-docs` follows it once and starts its answer with a note naming the new ID (for example `/facebook/react` now answers from `/react/react`). A `redirectUrl` that is not a library ID (`/owner/project[/version]`, or a `context7.com` URL with that path and no query) is not followed, and the `301` is returned as an error.
 
 Searching with both slots doubles the upstream search calls. Documentation calls, which carry most of the payload, are still spread across the slots.
 
@@ -62,9 +62,9 @@ Every tool call writes one JSON line to stdout through [pino](https://getpino.io
 | --- | --- |
 | `tool`, `libraryName`, `libraryId`, `query` | What was asked |
 | `userAgent`, `requestId` | Which client asked; one ID per HTTP request |
-| `outcome`, `errorStatus`, `errorCode`, `errorMessage` | `ok`, `empty` (Context7 answered with no documentation), or `error`, with Context7's error code such as `no_relevant_snippets`, or its message when it sent no code |
+| `outcome`, `errorStatus`, `errorCode`, `errorMessage` | `ok`, `empty` (Context7 answered with no documentation), or `error`, with Context7's error code such as `no_relevant_snippets` and its message |
 | `resultCount`, `responseChars`, `redirectedTo` | What came back |
-| `attempts[]` | Each upstream call: `slot`, `endpoint`, `status`, `code`, `durationMs`, `rateLimitRemaining`, `rateLimitLimit` |
+| `attempts[]` | Each upstream call: `slot`, `endpoint`, `status`, `code`, `durationMs` (including the body), `rateLimitRemaining`, `rateLimitLimit` |
 | `upstreamCalls`, `durationMs`, `version` | Totals and the build that served it |
 
 Slot rotation notes (`event: "rotation"`) and server errors (`event: "server_error"`) use the same stream. No record contains a key. Records do contain the callers' queries in full; that is the point of them, and it is why the tool descriptions tell agents to keep secrets out of queries.
@@ -73,12 +73,14 @@ When `TELEMETRY_LOKI_URL` is set, the same lines are also pushed with [pino-loki
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `TELEMETRY_LOKI_URL` | unset (stdout only) | Base URL, e.g. `https://192.168.30.11:8427`. Any path in it is replaced by the endpoint below. A value that is not a URL turns pushing off with one warning |
+| `TELEMETRY_LOKI_URL` | unset (stdout only) | Base URL, e.g. `https://192.168.30.11:8427`. Any path in it is replaced by the endpoint below. A value that is not an `http(s)` URL turns pushing off with one warning |
 | `TELEMETRY_LOKI_ENDPOINT` | `/insert/loki/api/v1/push?_msg_field=msg` | Push path; `_msg_field=msg` tells VictoriaLogs which field is the message |
 | `TELEMETRY_LOKI_USERNAME`, `TELEMETRY_LOKI_PASSWORD` | unset | Basic auth for the push |
 | `NODE_EXTRA_CA_CERTS` | unset | PEM file for a private CA in front of the endpoint |
 
-A push failure is printed to stderr and never fails a tool call. On `SIGTERM` or `SIGINT` the server stops accepting requests and sends the last batch before exiting, waiting at most 5 seconds.
+A push failure is printed to stderr and never fails a tool call. On `SIGTERM` or `SIGINT` the server stops accepting requests, lets calls in progress finish (up to 20 seconds) so their records are written, then sends the last batch (up to 5 seconds) and exits, inside Kubernetes' default 30-second grace period.
+
+A call whose arguments fail the tool's schema is rejected by the MCP SDK before the tool runs, so it has no record.
 
 VictoriaLogs splits each pushed JSON line into fields, so every field above can be filtered and grouped. Example LogsQL queries:
 

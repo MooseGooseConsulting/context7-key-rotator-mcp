@@ -14,7 +14,7 @@ export type UpstreamAttempt = {
 
 /** What is known about the MCP request being served, shared with the API client. */
 export type RequestContext = {
-  requestId: string;
+  requestId?: string;
   userAgent?: string;
   attempts: UpstreamAttempt[];
   redirectedTo?: string;
@@ -50,11 +50,12 @@ export type Telemetry = {
 
 /**
  * pino-loki options from the environment, or undefined when pushing is off or
- * TELEMETRY_LOKI_URL is not a URL. The endpoint is an absolute path, so any
+ * TELEMETRY_LOKI_URL is not an http(s) URL. The endpoint is an absolute path, so any
  * path in TELEMETRY_LOKI_URL is replaced by it.
  */
 export function lokiOptions(env: NodeJS.ProcessEnv = process.env): Record<string, unknown> | undefined {
-  if (!env.TELEMETRY_LOKI_URL || !URL.canParse(env.TELEMETRY_LOKI_URL)) return undefined;
+  const url = parseUrl(env.TELEMETRY_LOKI_URL);
+  if (!url || (url.protocol !== "http:" && url.protocol !== "https:")) return undefined;
   return {
     host: env.TELEMETRY_LOKI_URL,
     endpoint: env.TELEMETRY_LOKI_ENDPOINT || "/insert/loki/api/v1/push?_msg_field=msg",
@@ -67,12 +68,22 @@ export function lokiOptions(env: NodeJS.ProcessEnv = process.env): Record<string
   };
 }
 
+/** `new URL` without the throw; `URL.parse` needs Node 22. */
+export function parseUrl(value: string | undefined): URL | undefined {
+  if (!value) return undefined;
+  try {
+    return new URL(value);
+  } catch {
+    return undefined;
+  }
+}
+
 export function createLogger(env: NodeJS.ProcessEnv = process.env): Telemetry {
   const base = { app: "context7-key-rotator", version: rotatorVersion(env) };
   const loki = lokiOptions(env);
   if (!loki) {
     const logger = pino({ base });
-    if (env.TELEMETRY_LOKI_URL) logger.warn({ event: "telemetry" }, "TELEMETRY_LOKI_URL is not a URL; records go to stdout only");
+    if (env.TELEMETRY_LOKI_URL) logger.warn({ event: "telemetry" }, "TELEMETRY_LOKI_URL is not an http(s) URL; records go to stdout only");
     return { logger, shutdown: async () => logger.flush() };
   }
 
@@ -84,11 +95,17 @@ export function createLogger(env: NodeJS.ProcessEnv = process.env): Telemetry {
   });
   // pino treats a transport error as fatal; without a listener it would crash
   // the MCP server. Losing records is better than losing the tools.
+  let closed = false;
   transport.on("error", (error: Error) => process.stderr.write(`Telemetry transport failed: ${error.message}\n`));
+  transport.once("close", () => { closed = true; });
   const logger = pino({ base }, transport);
   return {
     logger,
     shutdown: (timeoutMs = 5_000) => new Promise<void>((resolve) => {
+      if (closed) {
+        resolve();
+        return;
+      }
       const timer = setTimeout(resolve, timeoutMs);
       transport.once("close", () => {
         clearTimeout(timer);

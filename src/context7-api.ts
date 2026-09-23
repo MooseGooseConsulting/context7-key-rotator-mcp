@@ -1,5 +1,5 @@
 import { type KeyLease, RoundRobinKeyPool } from "./key-pool.js";
-import { noteRedirect, recordAttempt, type UpstreamAttempt } from "./telemetry.js";
+import { noteRedirect, parseUrl, recordAttempt, type UpstreamAttempt } from "./telemetry.js";
 
 function headerNumber(headers: Headers, name: string): number | undefined {
   const value = headers.get(name);
@@ -78,13 +78,15 @@ export function redirectTarget(redirectUrl: string | undefined): string | undefi
   if (!redirectUrl) return undefined;
   let path = redirectUrl.trim();
   if (/^https?:\/\//i.test(path)) {
-    try {
-      path = new URL(path).pathname;
-    } catch {
-      return undefined;
-    }
+    const url = parseUrl(path);
+    if (!url || !/(^|\.)context7\.com$/i.test(url.hostname) || url.search || url.hash) return undefined;
+    path = url.pathname;
   }
-  return /^\/[^/\s]+\/[^\s]+$/.test(path) ? path.replace(/\/+$/, "") : undefined;
+  const segments = path.replace(/\/+$/, "").split("/").slice(1);
+  const valid = path.startsWith("/")
+    && segments.length >= 2
+    && segments.every((segment) => /^[^/\s?#]+$/.test(segment) && segment !== "." && segment !== "..");
+  return valid ? `/${segments.join("/")}` : undefined;
 }
 
 /** What query-docs returns when Context7 answers 200 with an empty body. */
@@ -134,7 +136,7 @@ export class Context7ApiClient {
     const url = new URL(`${API_BASE_URL}/v2/libs/search`);
     url.searchParams.set("query", query);
     url.searchParams.set("libraryName", libraryName);
-    return this.withEveryKey(async (lease) => (await this.fetchResponse(url, lease, "search")).json() as Promise<SearchResponse>);
+    return this.withEveryKey(async (lease) => JSON.parse(await this.fetchText(url, lease, "search")) as SearchResponse);
   }
 
   /**
@@ -160,7 +162,7 @@ export class Context7ApiClient {
     url.searchParams.set("query", query);
     url.searchParams.set("libraryId", libraryId);
     return this.withBalancedKey(async (lease) => {
-      const text = await (await this.fetchResponse(url, lease, "context")).text();
+      const text = await this.fetchText(url, lease, "context");
       return text || DOCS_NOT_FOUND;
     });
   }
@@ -230,9 +232,14 @@ export class Context7ApiClient {
     }
   }
 
-  private async fetchResponse(url: URL, lease: KeyLease, endpoint: UpstreamAttempt["endpoint"]): Promise<Response> {
+  /**
+   * One upstream call, body included, so an attempt's duration covers the
+   * whole transfer and a body that fails partway is recorded as a failure.
+   */
+  private async fetchText(url: URL, lease: KeyLease, endpoint: UpstreamAttempt["endpoint"]): Promise<string> {
     const started = performance.now();
     let response: Response;
+    let detail: string;
     try {
       response = await this.fetchImpl(url, {
         headers: {
@@ -241,6 +248,7 @@ export class Context7ApiClient {
         },
         signal: AbortSignal.timeout(API_TIMEOUT_MS),
       });
+      detail = await response.text();
     } catch (error) {
       recordAttempt({ slot: lease.index, endpoint, status: "network_error", durationMs: Math.round(performance.now() - started) });
       throw new Error(`Context7 request failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -257,10 +265,9 @@ export class Context7ApiClient {
 
     if (response.ok) {
       recordAttempt(attempt);
-      return response;
+      return detail;
     }
 
-    const detail = await response.text();
     const body = parseErrorBody(detail);
     recordAttempt({ ...attempt, code: typeof body.error === "string" ? body.error : undefined });
     throw new Context7ApiError(

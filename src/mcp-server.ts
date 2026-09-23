@@ -32,7 +32,7 @@ async function observed(
   // A fresh context per tool call, so a request that carries several calls
   // does not credit one call with another's upstream attempts.
   const parent = requestContext.getStore();
-  const context: RequestContext = { requestId: parent?.requestId ?? "", userAgent: parent?.userAgent, attempts: [] };
+  const context: RequestContext = { requestId: parent?.requestId, userAgent: parent?.userAgent, attempts: [] };
   return requestContext.run(context, () => observe(record, tool, args, run));
 }
 
@@ -77,11 +77,26 @@ async function observe(
   return outcome.result;
 }
 
-/** Context7's own message when it gave no error code, truncated; otherwise the code says enough. */
+/** The failure's message (Context7's own for an API error), truncated. */
 function errorMessage(failure: unknown): string | undefined {
   if (failure === undefined) return undefined;
-  if (failure instanceof Context7ApiError && failure.code) return undefined;
+  if (failure instanceof Context7ApiError && failure.code) {
+    const message = parseMessage(failure.message);
+    return message?.slice(0, 300);
+  }
   return String(failure instanceof Error ? failure.message : failure).slice(0, 500);
+}
+
+/** The `message` field of a Context7 JSON error body. */
+function parseMessage(body: string): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    return parsed && typeof parsed === "object" && typeof (parsed as { message?: unknown }).message === "string"
+      ? (parsed as { message: string }).message
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function toolError(error: unknown) {

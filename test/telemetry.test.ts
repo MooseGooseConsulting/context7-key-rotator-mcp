@@ -2,9 +2,10 @@ import { describe, expect, it } from "vitest";
 import { lokiOptions, rotatorVersion } from "../src/telemetry.js";
 
 describe("lokiOptions", () => {
-  it("is off without TELEMETRY_LOKI_URL or with one that is not a URL", () => {
+  it("is off without TELEMETRY_LOKI_URL or with one that is not an http(s) URL", () => {
     expect(lokiOptions({})).toBeUndefined();
     expect(lokiOptions({ TELEMETRY_LOKI_URL: "192.168.30.11:8427 " })).toBeUndefined();
+    expect(lokiOptions({ TELEMETRY_LOKI_URL: "loki:3100" })).toBeUndefined();
   });
 
   it("targets VictoriaLogs' Loki path with basic auth and job/event labels", () => {

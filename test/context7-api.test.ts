@@ -251,6 +251,11 @@ describe("redirectTarget", () => {
     expect(redirectTarget("react")).toBeUndefined();
     expect(redirectTarget("/react")).toBeUndefined();
     expect(redirectTarget("https://context7.com/")).toBeUndefined();
+    expect(redirectTarget("/foo/../bar")).toBeUndefined();
+    expect(redirectTarget("/a/b?x=1")).toBeUndefined();
+    expect(redirectTarget("/a//")).toBeUndefined();
+    expect(redirectTarget("https://evil.example/a/b")).toBeUndefined();
+    expect(redirectTarget("https://context7.com/a/b?tokens=1")).toBeUndefined();
   });
 });
 
