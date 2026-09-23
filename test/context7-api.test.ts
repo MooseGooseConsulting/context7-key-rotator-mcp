@@ -27,8 +27,6 @@ function silentClient(pool: RoundRobinKeyPool, fetch: FetchLike, lines: string[]
 
 const context7 = { id: "/upstash/context7", title: "Context7", description: "docs" };
 const truefoundry = { id: "/truefoundry/context7-mcp-server", title: "Context7 MCP Server", description: "mcp" };
-const stripe = { id: "/websites/stripe", title: "Stripe", description: "payments" };
-const fastapi = { id: "/websites/fastapi", title: "FastAPI", description: "api" };
 
 describe("Context7ApiClient query-docs rotation", () => {
   it("balances ordinary calls between the two keys", async () => {
@@ -191,6 +189,17 @@ describe("Context7ApiClient resolve-library-id rotation", () => {
     await expect(client.searchLibraries("docs", "Context7")).resolves.toEqual({ results: [truefoundry] });
 
     expect(mock.authorizations).toEqual(["Bearer one", "Bearer two", "Bearer two"]);
+  });
+
+  it("retries a search the first key's teamspace is not allowed to make on the other key", async () => {
+    const mock = fakeFetch([
+      () => Response.json({ error: "access_denied", message: "denied" }, { status: 403 }),
+      () => Response.json({ results: [context7] }),
+    ]);
+    const client = silentClient(new RoundRobinKeyPool(["one", "two"]), mock.fetch);
+
+    await expect(client.searchLibraries("docs", "Context7")).resolves.toEqual({ results: [context7] });
+    expect(mock.authorizations).toEqual(["Bearer one", "Bearer two"]);
   });
 
   it("fails with the upstream error without a retry when it is not a key problem", async () => {

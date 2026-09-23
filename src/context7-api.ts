@@ -51,7 +51,8 @@ export class Context7ApiError extends Error {
    * teamspace library filters with the same "not found" as an unindexed library,
    * so that 404 is worth one attempt on the other key. Other 404s, such as
    * `no_relevant_snippets` (the library exists but nothing matched the query),
-   * would get the same answer from either key.
+   * would get the same answer from either key. Searches take the same path; a
+   * search with no matches is a 200 with empty results, so a search 404 is rare.
    */
   public get isNotFound(): boolean {
     return this.status === 404 && (this.code === undefined || this.code === "library_not_found");

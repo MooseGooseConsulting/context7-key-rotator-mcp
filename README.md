@@ -40,7 +40,7 @@ Only `401`, `403`, `404`, and `429` cause an alternate-key retry. A `500`, malfo
 
 Each Context7 key belongs to a teamspace whose [library filters](https://context7.com/dashboard?tab=policies) decide which libraries it can see. Both teamspaces are set to the same filters, so either key gives the same answer. Keep them identical: if they differ, what a search returns depends on whose turn it is.
 
-- A hidden library announces itself with `403 access_denied` or `404 library_not_found`, and those are retried once on the other slot. `404 no_relevant_snippets` means the library exists but nothing matched the query; either key would answer it the same way, so it is returned without a retry.
+- In search results, a hidden library is simply left out. For `query-docs`, it announces itself with `403 access_denied` or `404 library_not_found`, and those are retried once on the other slot. `404 no_relevant_snippets` means the library exists but nothing matched the query; either key would answer it the same way, so it is returned without a retry.
 - A `301 library_redirected` carries the new library ID in its JSON `redirectUrl` field and no `Location` header. `query-docs` follows it once and starts its answer with a note naming the new ID (for example `/facebook/react` now answers from `/react/react`). A `redirectUrl` that is not a library ID (`/owner/project[/version]`, or a `context7.com` URL with that path and no query) is not followed, and the `301` is returned as an error.
 
 Cooldowns and retries are logged to stderr by slot index, never by key.
@@ -87,7 +87,7 @@ job:"context7-key-rotator" event:"tool_call" _time:1d | stats by (userAgent) cou
 
 ## Boundaries and limitations
 
-- Each upstream attempt has a 60-second timeout. A blocked response that arrives before that timeout may be followed by one alternate attempt, and a redirect repeats that for the new library ID, so one `query-docs` call makes at most four upstream calls and can take up to roughly four upstream timeout windows. There is no unbounded wait for an upstream request.
+- Each upstream attempt has a 60-second timeout. A blocked response that arrives before that timeout may be followed by one alternate attempt, and a redirect repeats that for the new library ID, so one `query-docs` call makes at most four upstream calls and can take up to roughly four upstream timeout windows; a `resolve-library-id` call makes at most two. There is no unbounded wait for an upstream request.
 - The service intentionally has no key scoring, session affinity, persistent state, OAuth flow, CLI adapter, or proxy cache. Its only per-key state is the in-memory `429` cooldown. It is a two-key round-robin retry layer, not a quota manager.
 - A container restart resets selection to slot 0. This is expected and does not alter the configured keys.
 - There is no upstream-aware health endpoint. A running container proves only that the MCP server process is listening; prove Context7 availability with a real tool call.
