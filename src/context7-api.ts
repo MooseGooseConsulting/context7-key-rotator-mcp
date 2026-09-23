@@ -69,6 +69,27 @@ function parseErrorBody(text: string): ErrorBody {
   }
 }
 
+/**
+ * The library ID a `301 library_redirected` points to. Context7 sends a bare
+ * ID such as `/react/react`; a full URL is reduced to its path. Anything that
+ * is not `/owner/project[/...]` is not followed.
+ */
+export function redirectTarget(redirectUrl: string | undefined): string | undefined {
+  if (!redirectUrl) return undefined;
+  let path = redirectUrl.trim();
+  if (/^https?:\/\//i.test(path)) {
+    try {
+      path = new URL(path).pathname;
+    } catch {
+      return undefined;
+    }
+  }
+  return /^\/[^/\s]+\/[^\s]+$/.test(path) ? path.replace(/\/+$/, "") : undefined;
+}
+
+/** What query-docs returns when Context7 answers 200 with an empty body. */
+export const DOCS_NOT_FOUND = "Documentation not found or not finalized for this library. This might have happened because you used an invalid Context7-compatible library ID.";
+
 export type FetchLike = typeof fetch;
 
 /**
@@ -125,13 +146,12 @@ export class Context7ApiClient {
     try {
       return await this.fetchLibraryContextOnce(query, libraryId);
     } catch (error) {
-      if (!(error instanceof Context7ApiError) || error.status !== 301 || !error.redirectUrl || error.redirectUrl === libraryId) {
-        throw error;
-      }
-      this.log(`Context7 library ${libraryId} redirected to ${error.redirectUrl}`);
-      noteRedirect(error.redirectUrl);
-      const text = await this.fetchLibraryContextOnce(query, error.redirectUrl);
-      return `Note: Context7 library ${libraryId} has moved to ${error.redirectUrl}; use that ID from now on.\n\n${text}`;
+      const target = error instanceof Context7ApiError && error.status === 301 ? redirectTarget(error.redirectUrl) : undefined;
+      if (!target || target === libraryId) throw error;
+      this.log(`Context7 library ${libraryId} redirected to ${target}`);
+      noteRedirect(target);
+      const text = await this.fetchLibraryContextOnce(query, target);
+      return `Note: Context7 library ${libraryId} has moved to ${target}; use that ID from now on.\n\n${text}`;
     }
   }
 
@@ -141,7 +161,7 @@ export class Context7ApiClient {
     url.searchParams.set("libraryId", libraryId);
     return this.withBalancedKey(async (lease) => {
       const text = await (await this.fetchResponse(url, lease, "context")).text();
-      return text || "Documentation not found or not finalized for this library. This might have happened because you used an invalid Context7-compatible library ID.";
+      return text || DOCS_NOT_FOUND;
     });
   }
 

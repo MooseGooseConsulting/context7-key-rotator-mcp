@@ -1,8 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { Context7ApiClient, Context7ApiError } from "./context7-api.js";
+import { Context7ApiClient, Context7ApiError, DOCS_NOT_FOUND } from "./context7-api.js";
 import { formatSearchResults } from "./format.js";
-import { requestContext } from "./telemetry.js";
+import { type RequestContext, requestContext, rotatorVersion } from "./telemetry.js";
 
 const resolveSchema = z.object({
   query: z.string().min(1).describe("What to look up in the library's documentation. This is used to rank library results by relevance to what the user is trying to accomplish. The query is sent to the Context7 API for processing. Do not include any sensitive or confidential information such as API keys, passwords, credentials, personal data, or proprietary code in your query."),
@@ -27,10 +27,23 @@ async function observed(
   record: ToolCallRecorder,
   tool: string,
   args: Record<string, string>,
-  run: () => Promise<{ result: ToolResult; resultCount?: number }>,
+  run: () => Promise<{ result: ToolResult; resultCount?: number; outcome?: string }>,
+): Promise<ToolResult> {
+  // A fresh context per tool call, so a request that carries several calls
+  // does not credit one call with another's upstream attempts.
+  const parent = requestContext.getStore();
+  const context: RequestContext = { requestId: parent?.requestId ?? "", userAgent: parent?.userAgent, attempts: [] };
+  return requestContext.run(context, () => observe(record, tool, args, run));
+}
+
+async function observe(
+  record: ToolCallRecorder,
+  tool: string,
+  args: Record<string, string>,
+  run: () => Promise<{ result: ToolResult; resultCount?: number; outcome?: string }>,
 ): Promise<ToolResult> {
   const started = performance.now();
-  let outcome: { result: ToolResult; resultCount?: number };
+  let outcome: { result: ToolResult; resultCount?: number; outcome?: string };
   let failure: unknown;
   try {
     outcome = await run();
@@ -39,24 +52,36 @@ async function observed(
     outcome = { result: toolError(error) };
   }
   const context = requestContext.getStore();
-  record({
+  const event = {
     event: "tool_call",
     requestId: context?.requestId,
     userAgent: context?.userAgent,
     tool,
     ...args,
-    outcome: outcome.result.isError ? "error" : "ok",
+    outcome: outcome.result.isError ? "error" : outcome.outcome ?? "ok",
     errorStatus: failure instanceof Context7ApiError ? failure.status : undefined,
     errorCode: failure instanceof Context7ApiError ? failure.code : undefined,
-    errorMessage: failure !== undefined && !(failure instanceof Context7ApiError) ? String(failure instanceof Error ? failure.message : failure) : undefined,
+    errorMessage: errorMessage(failure),
     resultCount: outcome.resultCount,
     responseChars: outcome.result.content.reduce((total, part) => total + part.text.length, 0),
     redirectedTo: context?.redirectedTo,
     upstreamCalls: context?.attempts.length,
     attempts: context?.attempts,
     durationMs: Math.round(performance.now() - started),
-  });
+  };
+  try {
+    record(event);
+  } catch {
+    // A broken recorder must not turn a served tool call into an error.
+  }
   return outcome.result;
+}
+
+/** Context7's own message when it gave no error code, truncated; otherwise the code says enough. */
+function errorMessage(failure: unknown): string | undefined {
+  if (failure === undefined) return undefined;
+  if (failure instanceof Context7ApiError && failure.code) return undefined;
+  return String(failure instanceof Error ? failure.message : failure).slice(0, 500);
 }
 
 function toolError(error: unknown) {
@@ -69,7 +94,7 @@ function toolError(error: unknown) {
 export function createContext7McpServer(api: Context7ApiClient, record: ToolCallRecorder = () => {}): McpServer {
   const server = new McpServer({
     name: "Context7 Key Rotator",
-    version: process.env.ROTATOR_VERSION || "0.1.0",
+    version: rotatorVersion(),
     websiteUrl: "https://context7.com",
     description: "Context7 V2 documentation lookup with balanced upstream API keys.",
   });
@@ -120,9 +145,13 @@ Do not call this tool more than 3 times per question.`,
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true, idempotentHint: true },
     },
     async ({ libraryId, query }) =>
-      observed(record, "query-docs", { libraryId, query }, async () => ({
-        result: { content: [{ type: "text" as const, text: await api.fetchLibraryContext(query, libraryId) }] },
-      })),
+      observed(record, "query-docs", { libraryId, query }, async () => {
+        const text = await api.fetchLibraryContext(query, libraryId);
+        return {
+          result: { content: [{ type: "text" as const, text }] },
+          outcome: text.endsWith(DOCS_NOT_FOUND) ? "empty" : undefined,
+        };
+      }),
   );
 
   return server;

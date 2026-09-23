@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Context7ApiClient, Context7ApiError, type FetchLike, mergeSearchResponses, parseRetryAfterMs } from "../src/context7-api.js";
+import { Context7ApiClient, Context7ApiError, type FetchLike, mergeSearchResponses, parseRetryAfterMs, redirectTarget } from "../src/context7-api.js";
 import { RoundRobinKeyPool } from "../src/key-pool.js";
 
 function fakeFetch(responses: Array<(authorization: string | null) => Response>): { fetch: FetchLike; authorizations: string[]; urls: string[] } {
@@ -134,6 +134,30 @@ describe("Context7ApiClient query-docs error codes", () => {
     await expect(client.fetchLibraryContext("q", "/a/a")).rejects.toMatchObject({ status: 301, redirectUrl: "/c/c" });
     expect(mock.urls).toHaveLength(2);
   });
+
+  it("retries a redirect target hidden from the first key on the other key", async () => {
+    const mock = fakeFetch([
+      () => Response.json({ error: "library_redirected", redirectUrl: "/b/b" }, { status: 301 }),
+      () => Response.json({ error: "library_not_found", message: "hidden" }, { status: 404 }),
+      () => new Response("docs for b", { status: 200 }),
+    ]);
+    const client = silentClient(new RoundRobinKeyPool(["one", "two"]), mock.fetch);
+
+    await expect(client.fetchLibraryContext("q", "/a/a")).resolves.toContain("docs for b");
+    expect(mock.authorizations).toEqual(["Bearer one", "Bearer two", "Bearer one"]);
+  });
+
+  it.each([
+    ["without a redirectUrl", undefined],
+    ["pointing at the same library", "/a/a"],
+    ["pointing at something that is not a library ID", "elsewhere"],
+  ])("returns a 301 %s as an error without following it", async (_label, redirectUrl) => {
+    const mock = fakeFetch([() => Response.json({ error: "library_redirected", redirectUrl }, { status: 301 })]);
+    const client = silentClient(new RoundRobinKeyPool(["one", "two"]), mock.fetch);
+
+    await expect(client.fetchLibraryContext("q", "/a/a")).rejects.toMatchObject({ status: 301 });
+    expect(mock.urls).toHaveLength(1);
+  });
 });
 
 describe("Context7ApiClient resolve-library-id across both keys", () => {
@@ -215,6 +239,18 @@ describe("Context7ApiClient resolve-library-id across both keys", () => {
 
     expect(lines).toEqual(["Context7 search results differ by slot: slot 0 alone returned 1, slot 1 alone returned 1"]);
     expect(lines.join("\n")).not.toContain("secret");
+  });
+});
+
+describe("redirectTarget", () => {
+  it("accepts a bare library ID or a full URL and rejects anything else", () => {
+    expect(redirectTarget("/react/react")).toBe("/react/react");
+    expect(redirectTarget("/vercel/next.js/v15.1.8")).toBe("/vercel/next.js/v15.1.8");
+    expect(redirectTarget("https://context7.com/react/react/")).toBe("/react/react");
+    expect(redirectTarget(undefined)).toBeUndefined();
+    expect(redirectTarget("react")).toBeUndefined();
+    expect(redirectTarget("/react")).toBeUndefined();
+    expect(redirectTarget("https://context7.com/")).toBeUndefined();
   });
 });
 

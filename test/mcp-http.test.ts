@@ -147,4 +147,24 @@ describe("Streamable HTTP MCP endpoint", () => {
     expect(typeof events[0].userAgent).toBe("string");
     expect(JSON.stringify(events)).not.toContain("secret");
   });
+
+  it("records a followed redirect and an empty answer on the call that saw them", async () => {
+    let contextCalls = 0;
+    const fetchImpl: FetchLike = async (url) => {
+      if (new URL(url).searchParams.get("libraryId") === "/old/lib" && contextCalls++ === 0) {
+        return Response.json({ error: "library_redirected", redirectUrl: "/new/lib" }, { status: 301 });
+      }
+      return new Response("");
+    };
+    const api = new Context7ApiClient(new RoundRobinKeyPool(["one", "two"]), fetchImpl, () => {});
+    const events: Array<Record<string, any>> = [];
+    const endpoint = await startServer(api, { record: (event) => events.push(event) });
+
+    await postMcp(endpoint, "tools/call", 7, "query-docs", { libraryId: "/old/lib", query: "setup" });
+    await postMcp(endpoint, "tools/call", 8, "query-docs", { libraryId: "/new/lib", query: "setup" });
+
+    expect(events[0]).toMatchObject({ redirectedTo: "/new/lib", outcome: "empty", upstreamCalls: 2 });
+    expect(events[1].redirectedTo).toBeUndefined();
+    expect(events[1].upstreamCalls).toBe(1);
+  });
 });
