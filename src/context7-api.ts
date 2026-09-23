@@ -1,4 +1,12 @@
 import { type KeyLease, RoundRobinKeyPool } from "./key-pool.js";
+import { noteRedirect, recordAttempt, type UpstreamAttempt } from "./telemetry.js";
+
+function headerNumber(headers: Headers, name: string): number | undefined {
+  const value = headers.get(name);
+  if (value === null || value.trim() === "") return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
 
 const API_BASE_URL = "https://context7.com/api";
 const API_TIMEOUT_MS = 60_000;
@@ -105,7 +113,7 @@ export class Context7ApiClient {
     const url = new URL(`${API_BASE_URL}/v2/libs/search`);
     url.searchParams.set("query", query);
     url.searchParams.set("libraryName", libraryName);
-    return this.withEveryKey(async (key) => (await this.fetchResponse(url, key)).json() as Promise<SearchResponse>);
+    return this.withEveryKey(async (lease) => (await this.fetchResponse(url, lease, "search")).json() as Promise<SearchResponse>);
   }
 
   /**
@@ -121,6 +129,7 @@ export class Context7ApiClient {
         throw error;
       }
       this.log(`Context7 library ${libraryId} redirected to ${error.redirectUrl}`);
+      noteRedirect(error.redirectUrl);
       const text = await this.fetchLibraryContextOnce(query, error.redirectUrl);
       return `Note: Context7 library ${libraryId} has moved to ${error.redirectUrl}; use that ID from now on.\n\n${text}`;
     }
@@ -130,8 +139,8 @@ export class Context7ApiClient {
     const url = new URL(`${API_BASE_URL}/v2/context`);
     url.searchParams.set("query", query);
     url.searchParams.set("libraryId", libraryId);
-    return this.withBalancedKey(async (key) => {
-      const text = await (await this.fetchResponse(url, key)).text();
+    return this.withBalancedKey(async (lease) => {
+      const text = await (await this.fetchResponse(url, lease, "context")).text();
       return text || "Documentation not found or not finalized for this library. This might have happened because you used an invalid Context7-compatible library ID.";
     });
   }
@@ -142,7 +151,7 @@ export class Context7ApiClient {
    * the keys' teamspaces filter libraries differently. Keys skipped for a
    * cooldown are tried only if every available key failed.
    */
-  private async withEveryKey(operation: (key: string) => Promise<SearchResponse>): Promise<SearchResponse> {
+  private async withEveryKey(operation: (lease: KeyLease) => Promise<SearchResponse>): Promise<SearchResponse> {
     const leases = this.keyPool.leases();
     const available = leases.filter((lease) => !this.keyPool.isCoolingDown(lease.index));
     const cooling = leases.filter((lease) => this.keyPool.isCoolingDown(lease.index));
@@ -174,7 +183,7 @@ export class Context7ApiClient {
    * Runs the operation on the next key and at most once more on the other key
    * when the first key is blocked or reports "not found".
    */
-  private async withBalancedKey<T>(operation: (key: string) => Promise<T>): Promise<T> {
+  private async withBalancedKey<T>(operation: (lease: KeyLease) => Promise<T>): Promise<T> {
     const selected = this.keyPool.next();
     const alternate = this.keyPool.alternate(selected);
     try {
@@ -188,9 +197,9 @@ export class Context7ApiClient {
     }
   }
 
-  private async attempt<T>(lease: KeyLease, operation: (key: string) => Promise<T>): Promise<T> {
+  private async attempt<T>(lease: KeyLease, operation: (lease: KeyLease) => Promise<T>): Promise<T> {
     try {
-      return await operation(lease.value);
+      return await operation(lease);
     } catch (error) {
       if (error instanceof Context7ApiError && error.status === 429) {
         const cooldown = Math.min(error.retryAfterMs ?? DEFAULT_RATE_LIMIT_COOLDOWN_MS, MAX_RATE_LIMIT_COOLDOWN_MS);
@@ -201,26 +210,39 @@ export class Context7ApiClient {
     }
   }
 
-  private async fetchResponse(url: URL, key: string): Promise<Response> {
+  private async fetchResponse(url: URL, lease: KeyLease, endpoint: UpstreamAttempt["endpoint"]): Promise<Response> {
+    const started = performance.now();
     let response: Response;
     try {
       response = await this.fetchImpl(url, {
         headers: {
-          Authorization: `Bearer ${key}`,
+          Authorization: `Bearer ${lease.value}`,
           "X-Context7-Source": "context7-key-rotator-mcp",
         },
         signal: AbortSignal.timeout(API_TIMEOUT_MS),
       });
     } catch (error) {
+      recordAttempt({ slot: lease.index, endpoint, status: "network_error", durationMs: Math.round(performance.now() - started) });
       throw new Error(`Context7 request failed: ${error instanceof Error ? error.message : String(error)}`);
     }
 
+    const attempt: UpstreamAttempt = {
+      slot: lease.index,
+      endpoint,
+      status: response.status,
+      durationMs: Math.round(performance.now() - started),
+      rateLimitRemaining: headerNumber(response.headers, "ratelimit-remaining"),
+      rateLimitLimit: headerNumber(response.headers, "ratelimit-limit"),
+    };
+
     if (response.ok) {
+      recordAttempt(attempt);
       return response;
     }
 
     const detail = await response.text();
     const body = parseErrorBody(detail);
+    recordAttempt({ ...attempt, code: typeof body.error === "string" ? body.error : undefined });
     throw new Context7ApiError(
       detail || `Context7 request failed with status ${response.status}.`,
       response.status,

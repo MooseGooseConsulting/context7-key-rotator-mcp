@@ -43,7 +43,8 @@ Each Context7 key belongs to a teamspace whose [library filters](https://context
 The rotator makes the answer independent of whose turn it is:
 
 - `resolve-library-id` searches with both slots in parallel and merges the results: interleaved by rank in slot order and de-duplicated by library ID. Every call sees every library that either teamspace allows. The filter note is shown only if both slots applied a filter. A slot that is cooling down is skipped, and is asked only if every available slot fails. If one slot fails, the other slot's results are returned alone.
-- `query-docs` stays round-robin, because a hidden library announces itself with `404`. That `404` is retried once on the other slot.
+- `query-docs` stays round-robin. A hidden library announces itself with `403 access_denied` or `404 library_not_found`, and those are retried once on the other slot. `404 no_relevant_snippets` means the library exists but nothing matched the query; either key would answer it the same way, so it is returned without a retry.
+- A `301 library_redirected` carries the new library ID in its JSON `redirectUrl` field and no `Location` header. `query-docs` follows it once and starts its answer with a note naming the new ID (for example `/facebook/react` now answers from `/react/react`).
 
 Searching with both slots doubles the upstream search calls. Documentation calls, which carry most of the payload, are still spread across the slots.
 
@@ -52,6 +53,38 @@ When the slots' search results differ, one stderr line records how many results 
 ### Rate-limit cooldown
 
 A `429` puts that slot into a cooldown for the `Retry-After` period Context7 sends (delta seconds or an HTTP date), or 60 seconds when the header is missing, capped at one hour. Ordinary selection skips a cooling slot while the other slot is available, so an exhausted key no longer adds retry latency to half of all calls. If both slots are cooling, ordinary rotation continues, and the fallback is still tried.
+
+## Request records
+
+Every tool call writes one JSON line to stdout through [pino](https://getpino.io), with `event: "tool_call"` and:
+
+| Field | Meaning |
+| --- | --- |
+| `tool`, `libraryName`, `libraryId`, `query` | What was asked |
+| `userAgent`, `requestId` | Which client asked; one ID per HTTP request |
+| `outcome`, `errorStatus`, `errorCode`, `errorMessage` | How it ended, with Context7's error code such as `no_relevant_snippets` |
+| `resultCount`, `responseChars`, `redirectedTo` | What came back |
+| `attempts[]` | Each upstream call: `slot`, `endpoint`, `status`, `code`, `durationMs`, `rateLimitRemaining`, `rateLimitLimit` |
+| `upstreamCalls`, `durationMs`, `version` | Totals and the build that served it |
+
+Slot rotation notes (`event: "rotation"`) and server errors (`event: "server_error"`) use the same stream. No record contains a key.
+
+When `TELEMETRY_LOKI_URL` is set, the same lines are also pushed with [pino-loki](https://github.com/Julien-R44/pino-loki) to a Loki-compatible endpoint in 5-second batches, labelled `job="context7-key-rotator"` and `event`. The defaults target VictoriaLogs behind vmauth:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `TELEMETRY_LOKI_URL` | unset (stdout only) | Base URL, e.g. `https://192.168.30.11:8427` |
+| `TELEMETRY_LOKI_ENDPOINT` | `/insert/loki/api/v1/push?_msg_field=msg` | Push path; `_msg_field=msg` tells VictoriaLogs which field is the message |
+| `TELEMETRY_LOKI_USERNAME`, `TELEMETRY_LOKI_PASSWORD` | unset | Basic auth for the push |
+| `NODE_EXTRA_CA_CERTS` | unset | PEM file for a private CA in front of the endpoint |
+
+Example LogsQL queries:
+
+```
+job:"context7-key-rotator" event:"tool_call" _time:1d | stats by (tool, outcome) count()
+job:"context7-key-rotator" event:"tool_call" outcome:"error" _time:1d | stats by (errorCode) count()
+job:"context7-key-rotator" event:"tool_call" _time:1d | stats by (userAgent) count()
+```
 
 ## Boundaries and limitations
 

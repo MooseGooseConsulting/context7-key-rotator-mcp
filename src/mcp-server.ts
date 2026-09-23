@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { Context7ApiClient, Context7ApiError } from "./context7-api.js";
 import { formatSearchResults } from "./format.js";
+import { requestContext } from "./telemetry.js";
 
 const resolveSchema = z.object({
   query: z.string().min(1).describe("What to look up in the library's documentation. This is used to rank library results by relevance to what the user is trying to accomplish. The query is sent to the Context7 API for processing. Do not include any sensitive or confidential information such as API keys, passwords, credentials, personal data, or proprietary code in your query."),
@@ -13,6 +14,51 @@ const docsSchema = z.object({
   query: z.string().min(1).describe("What to look up in the library's documentation, scoped to a single concept. Be specific and include relevant details, but keep each query to one topic — if the user's question spans multiple distinct concepts, make a separate call per concept instead of combining them, unless the question is about how the concepts interact. Good: 'How to set up authentication with JWT in Express.js' or 'React useEffect cleanup function examples'. Bad (too vague): 'auth' or 'hooks'. Bad (too broad): 'routing and auth and caching in Next.js'. The query is sent to the Context7 API for processing. Do not include any sensitive or confidential information such as API keys, passwords, credentials, personal data, or proprietary code in your query."),
 });
 
+/** Where each finished tool call is recorded; index.ts sends it to the logger. */
+export type ToolCallRecorder = (event: Record<string, unknown>) => void;
+
+type ToolResult = { content: Array<{ type: "text"; text: string }>; isError?: boolean };
+
+/**
+ * Runs a tool call and records one event for it: who called (user agent), the
+ * arguments, the outcome, and every upstream Context7 attempt made to serve it.
+ */
+async function observed(
+  record: ToolCallRecorder,
+  tool: string,
+  args: Record<string, string>,
+  run: () => Promise<{ result: ToolResult; resultCount?: number }>,
+): Promise<ToolResult> {
+  const started = performance.now();
+  let outcome: { result: ToolResult; resultCount?: number };
+  let failure: unknown;
+  try {
+    outcome = await run();
+  } catch (error) {
+    failure = error;
+    outcome = { result: toolError(error) };
+  }
+  const context = requestContext.getStore();
+  record({
+    event: "tool_call",
+    requestId: context?.requestId,
+    userAgent: context?.userAgent,
+    tool,
+    ...args,
+    outcome: outcome.result.isError ? "error" : "ok",
+    errorStatus: failure instanceof Context7ApiError ? failure.status : undefined,
+    errorCode: failure instanceof Context7ApiError ? failure.code : undefined,
+    errorMessage: failure !== undefined && !(failure instanceof Context7ApiError) ? String(failure instanceof Error ? failure.message : failure) : undefined,
+    resultCount: outcome.resultCount,
+    responseChars: outcome.result.content.reduce((total, part) => total + part.text.length, 0),
+    redirectedTo: context?.redirectedTo,
+    upstreamCalls: context?.attempts.length,
+    attempts: context?.attempts,
+    durationMs: Math.round(performance.now() - started),
+  });
+  return outcome.result;
+}
+
 function toolError(error: unknown) {
   const message = error instanceof Context7ApiError
     ? error.message
@@ -20,7 +66,7 @@ function toolError(error: unknown) {
   return { content: [{ type: "text" as const, text: message }], isError: true };
 }
 
-export function createContext7McpServer(api: Context7ApiClient): McpServer {
+export function createContext7McpServer(api: Context7ApiClient, record: ToolCallRecorder = () => {}): McpServer {
   const server = new McpServer({
     name: "Context7 Key Rotator",
     version: process.env.ROTATOR_VERSION || "0.1.0",
@@ -51,14 +97,14 @@ IMPORTANT: Do not call this tool more than 3 times per question. If you cannot f
       inputSchema: resolveSchema,
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true, idempotentHint: true },
     },
-    async ({ libraryName, query }) => {
-      try {
+    async ({ libraryName, query }) =>
+      observed(record, "resolve-library-id", { libraryName, query }, async () => {
         const response = await api.searchLibraries(query, libraryName);
-        return { content: [{ type: "text" as const, text: `Available Libraries:\n\n${formatSearchResults(response)}` }] };
-      } catch (error) {
-        return toolError(error);
-      }
-    },
+        return {
+          result: { content: [{ type: "text" as const, text: `Available Libraries:\n\n${formatSearchResults(response)}` }] },
+          resultCount: response.results?.length ?? 0,
+        };
+      }),
   );
 
   server.registerTool(
@@ -73,13 +119,10 @@ Do not call this tool more than 3 times per question.`,
       inputSchema: docsSchema,
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true, idempotentHint: true },
     },
-    async ({ libraryId, query }) => {
-      try {
-        return { content: [{ type: "text" as const, text: await api.fetchLibraryContext(query, libraryId) }] };
-      } catch (error) {
-        return toolError(error);
-      }
-    },
+    async ({ libraryId, query }) =>
+      observed(record, "query-docs", { libraryId, query }, async () => ({
+        result: { content: [{ type: "text" as const, text: await api.fetchLibraryContext(query, libraryId) }] },
+      })),
   );
 
   return server;
