@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Context7ApiClient, Context7ApiError, type FetchLike, mergeSearchResponses, parseRetryAfterMs } from "../src/context7-api.js";
+import { Context7ApiClient, Context7ApiError, type FetchLike, mergeSearchResponses, parseRetryAfterMs, redirectTarget } from "../src/context7-api.js";
 import { RoundRobinKeyPool } from "../src/key-pool.js";
 
 function fakeFetch(responses: Array<(authorization: string | null) => Response>): { fetch: FetchLike; authorizations: string[]; urls: string[] } {
@@ -84,6 +84,82 @@ describe("Context7ApiClient query-docs rotation", () => {
   });
 });
 
+describe("Context7ApiClient query-docs error codes", () => {
+  it("retries a filtered library_not_found 404 on the other key", async () => {
+    const mock = fakeFetch([
+      () => Response.json({ error: "library_not_found", message: "not found" }, { status: 404 }),
+      () => new Response("docs", { status: 200 }),
+    ]);
+    const client = silentClient(new RoundRobinKeyPool(["one", "two"]), mock.fetch);
+
+    await expect(client.fetchLibraryContext("q", "/a/b")).resolves.toBe("docs");
+    expect(mock.authorizations).toEqual(["Bearer one", "Bearer two"]);
+  });
+
+  it("does not retry no_relevant_snippets, which any key would answer the same way", async () => {
+    const mock = fakeFetch([
+      () => Response.json({ error: "no_relevant_snippets", message: "No documentation matched this query." }, { status: 404 }),
+    ]);
+    const client = silentClient(new RoundRobinKeyPool(["one", "two"]), mock.fetch);
+
+    await expect(client.fetchLibraryContext("q", "/siderolabs/talos")).rejects.toMatchObject({ status: 404, code: "no_relevant_snippets" });
+    expect(mock.authorizations).toEqual(["Bearer one"]);
+  });
+
+  it("follows a library_redirected 301 to its redirectUrl and says so", async () => {
+    const lines: string[] = [];
+    const mock = fakeFetch([
+      () => Response.json({ error: "library_redirected", message: "moved", redirectUrl: "/react/react" }, { status: 301 }),
+      () => new Response("### useState", { status: 200 }),
+    ]);
+    const client = silentClient(new RoundRobinKeyPool(["one", "two"]), mock.fetch, lines);
+
+    const text = await client.fetchLibraryContext("hooks", "/facebook/react");
+
+    expect(text).toBe("Note: Context7 library /facebook/react has moved to /react/react; use that ID from now on.\n\n### useState");
+    expect(mock.urls).toEqual([
+      "https://context7.com/api/v2/context?query=hooks&libraryId=%2Ffacebook%2Freact",
+      "https://context7.com/api/v2/context?query=hooks&libraryId=%2Freact%2Freact",
+    ]);
+    expect(lines).toEqual(["Context7 library /facebook/react redirected to /react/react"]);
+  });
+
+  it("follows at most one redirect", async () => {
+    const mock = fakeFetch([
+      () => Response.json({ error: "library_redirected", redirectUrl: "/b/b" }, { status: 301 }),
+      () => Response.json({ error: "library_redirected", redirectUrl: "/c/c" }, { status: 301 }),
+    ]);
+    const client = silentClient(new RoundRobinKeyPool(["one", "two"]), mock.fetch);
+
+    await expect(client.fetchLibraryContext("q", "/a/a")).rejects.toMatchObject({ status: 301, redirectUrl: "/c/c" });
+    expect(mock.urls).toHaveLength(2);
+  });
+
+  it("retries a redirect target hidden from the first key on the other key", async () => {
+    const mock = fakeFetch([
+      () => Response.json({ error: "library_redirected", redirectUrl: "/b/b" }, { status: 301 }),
+      () => Response.json({ error: "library_not_found", message: "hidden" }, { status: 404 }),
+      () => new Response("docs for b", { status: 200 }),
+    ]);
+    const client = silentClient(new RoundRobinKeyPool(["one", "two"]), mock.fetch);
+
+    await expect(client.fetchLibraryContext("q", "/a/a")).resolves.toContain("docs for b");
+    expect(mock.authorizations).toEqual(["Bearer one", "Bearer two", "Bearer one"]);
+  });
+
+  it.each([
+    ["without a redirectUrl", undefined],
+    ["pointing at the same library", "/a/a"],
+    ["pointing at something that is not a library ID", "elsewhere"],
+  ])("returns a 301 %s as an error without following it", async (_label, redirectUrl) => {
+    const mock = fakeFetch([() => Response.json({ error: "library_redirected", redirectUrl }, { status: 301 })]);
+    const client = silentClient(new RoundRobinKeyPool(["one", "two"]), mock.fetch);
+
+    await expect(client.fetchLibraryContext("q", "/a/a")).rejects.toMatchObject({ status: 301 });
+    expect(mock.urls).toHaveLength(1);
+  });
+});
+
 describe("Context7ApiClient resolve-library-id across both keys", () => {
   it("asks both keys and returns the same merged answer whichever key's turn it is", async () => {
     const filtered = { searchFilterApplied: true, results: [stripe, fastapi] };
@@ -163,6 +239,23 @@ describe("Context7ApiClient resolve-library-id across both keys", () => {
 
     expect(lines).toEqual(["Context7 search results differ by slot: slot 0 alone returned 1, slot 1 alone returned 1"]);
     expect(lines.join("\n")).not.toContain("secret");
+  });
+});
+
+describe("redirectTarget", () => {
+  it("accepts a bare library ID or a full URL and rejects anything else", () => {
+    expect(redirectTarget("/react/react")).toBe("/react/react");
+    expect(redirectTarget("/vercel/next.js/v15.1.8")).toBe("/vercel/next.js/v15.1.8");
+    expect(redirectTarget("https://context7.com/react/react/")).toBe("/react/react");
+    expect(redirectTarget(undefined)).toBeUndefined();
+    expect(redirectTarget("react")).toBeUndefined();
+    expect(redirectTarget("/react")).toBeUndefined();
+    expect(redirectTarget("https://context7.com/")).toBeUndefined();
+    expect(redirectTarget("/foo/../bar")).toBeUndefined();
+    expect(redirectTarget("/a/b?x=1")).toBeUndefined();
+    expect(redirectTarget("/a//")).toBeUndefined();
+    expect(redirectTarget("https://evil.example/a/b")).toBeUndefined();
+    expect(redirectTarget("https://context7.com/a/b?tokens=1")).toBeUndefined();
   });
 });
 

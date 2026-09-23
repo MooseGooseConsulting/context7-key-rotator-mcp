@@ -43,7 +43,8 @@ Each Context7 key belongs to a teamspace whose [library filters](https://context
 The rotator makes the answer independent of whose turn it is:
 
 - `resolve-library-id` searches with both slots in parallel and merges the results: interleaved by rank in slot order and de-duplicated by library ID. Every call sees every library that either teamspace allows. The filter note is shown only if both slots applied a filter. A slot that is cooling down is skipped, and is asked only if every available slot fails. If one slot fails, the other slot's results are returned alone.
-- `query-docs` stays round-robin, because a hidden library announces itself with `404`. That `404` is retried once on the other slot.
+- `query-docs` stays round-robin. A hidden library announces itself with `403 access_denied` or `404 library_not_found`, and those are retried once on the other slot. `404 no_relevant_snippets` means the library exists but nothing matched the query; either key would answer it the same way, so it is returned without a retry.
+- A `301 library_redirected` carries the new library ID in its JSON `redirectUrl` field and no `Location` header. `query-docs` follows it once and starts its answer with a note naming the new ID (for example `/facebook/react` now answers from `/react/react`). A `redirectUrl` that is not a library ID (`/owner/project[/version]`, or a `context7.com` URL with that path and no query) is not followed, and the `301` is returned as an error.
 
 Searching with both slots doubles the upstream search calls. Documentation calls, which carry most of the payload, are still spread across the slots.
 
@@ -53,9 +54,45 @@ When the slots' search results differ, one stderr line records how many results 
 
 A `429` puts that slot into a cooldown for the `Retry-After` period Context7 sends (delta seconds or an HTTP date), or 60 seconds when the header is missing, capped at one hour. Ordinary selection skips a cooling slot while the other slot is available, so an exhausted key no longer adds retry latency to half of all calls. If both slots are cooling, ordinary rotation continues, and the fallback is still tried.
 
+## Request records
+
+Every tool call writes one JSON line to stdout through [pino](https://getpino.io), with `event: "tool_call"` and:
+
+| Field | Meaning |
+| --- | --- |
+| `tool`, `libraryName`, `libraryId`, `query` | What was asked |
+| `userAgent`, `requestId` | Which client asked; one ID per HTTP request |
+| `outcome`, `errorStatus`, `errorCode`, `errorMessage` | `ok`, `empty` (Context7 answered with no documentation), or `error`, with Context7's error code such as `no_relevant_snippets` and its message |
+| `resultCount`, `responseChars`, `redirectedTo` | What came back |
+| `attempts[]` | Each upstream call: `slot`, `endpoint`, `status`, `code`, `durationMs` (including the body), `rateLimitRemaining`, `rateLimitLimit` |
+| `upstreamCalls`, `durationMs`, `version` | Totals and the build that served it |
+
+Slot rotation notes (`event: "rotation"`) and server errors (`event: "server_error"`) use the same stream. No record contains a key. Records do contain the callers' queries in full; that is the point of them, and it is why the tool descriptions tell agents to keep secrets out of queries.
+
+When `TELEMETRY_LOKI_URL` is set, the same lines are also pushed with [pino-loki](https://github.com/Julien-R44/pino-loki) to a Loki-compatible endpoint in 5-second batches, labelled `job="context7-key-rotator"` and `event`. The defaults target VictoriaLogs behind vmauth:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `TELEMETRY_LOKI_URL` | unset (stdout only) | Base URL, e.g. `https://192.168.30.11:8427`. Any path in it is replaced by the endpoint below. A value that is not an `http(s)` URL turns pushing off with one warning |
+| `TELEMETRY_LOKI_ENDPOINT` | `/insert/loki/api/v1/push?_msg_field=msg` | Push path; `_msg_field=msg` tells VictoriaLogs which field is the message |
+| `TELEMETRY_LOKI_USERNAME`, `TELEMETRY_LOKI_PASSWORD` | unset | Basic auth for the push |
+| `NODE_EXTRA_CA_CERTS` | unset | PEM file for a private CA in front of the endpoint |
+
+A push failure is printed to stderr and never fails a tool call. On `SIGTERM` or `SIGINT` the server stops accepting requests, lets calls in progress finish (up to 20 seconds) so their records are written, then sends the last batch (up to 5 seconds) and exits, inside Kubernetes' default 30-second grace period.
+
+A call whose arguments fail the tool's schema is rejected by the MCP SDK before the tool runs, so it has no record.
+
+VictoriaLogs splits each pushed JSON line into fields, so every field above can be filtered and grouped. Example LogsQL queries:
+
+```
+job:"context7-key-rotator" event:"tool_call" _time:1d | stats by (tool, outcome) count()
+job:"context7-key-rotator" event:"tool_call" outcome:"error" _time:1d | stats by (errorCode) count()
+job:"context7-key-rotator" event:"tool_call" _time:1d | stats by (userAgent) count()
+```
+
 ## Boundaries and limitations
 
-- Each upstream attempt has a 60-second timeout. A blocked response that arrives before that timeout may be followed by one alternate attempt, so one logical tool call can take up to roughly two upstream timeout windows. There is no unbounded wait for an upstream request.
+- Each upstream attempt has a 60-second timeout. A blocked response that arrives before that timeout may be followed by one alternate attempt, and a redirect repeats that for the new library ID, so one `query-docs` call makes at most four upstream calls and can take up to roughly four upstream timeout windows. There is no unbounded wait for an upstream request.
 - The service intentionally has no key scoring, session affinity, persistent state, OAuth flow, CLI adapter, or proxy cache. Its only per-key state is the in-memory `429` cooldown. It is a two-key round-robin retry layer, not a quota manager.
 - A container restart resets selection to slot 0. This is expected and does not alter the configured keys.
 - There is no upstream-aware health endpoint. A running container proves only that the MCP server process is listening; prove Context7 availability with a real tool call.
@@ -129,6 +166,6 @@ npm run build
 docker compose -f deploy/compose.yaml up -d --build
 ```
 
-The automated suite is deterministic: it mocks Context7 V2 responses and verifies MCP protocol handling, tool discovery, result formatting, normal alternation, alternate-key retry for `401`/`403`/`404`/`429`, two-slot search merging, `Retry-After` cooldowns, both-key failure, and integration-test server lifecycle. Green automated tests do **not** prove the current upstream service or credentials work.
+The automated suite is deterministic: it mocks Context7 V2 responses and verifies MCP protocol handling, tool discovery, result formatting, normal alternation, alternate-key retry for `401`/`403`/`404`/`429`, Context7 error codes and redirects, request records, two-slot search merging, `Retry-After` cooldowns, both-key failure, and integration-test server lifecycle. Green automated tests do **not** prove the current upstream service or credentials work.
 
 Live validation is separate. Use a real client or a protocol client to verify `tools/list`, then call `resolve-library-id` and `query-docs` with a real library. A valid result has an actual Context7 library ID, nonempty documentation, and source links or code/documentation content appropriate to the request.
