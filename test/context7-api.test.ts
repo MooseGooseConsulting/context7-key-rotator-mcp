@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Context7ApiClient, Context7ApiError, type FetchLike, mergeSearchResponses, parseRetryAfterMs, redirectTarget } from "../src/context7-api.js";
+import { Context7ApiClient, Context7ApiError, type FetchLike, parseRetryAfterMs, redirectTarget } from "../src/context7-api.js";
 import { RoundRobinKeyPool } from "../src/key-pool.js";
 
 function fakeFetch(responses: Array<(authorization: string | null) => Response>): { fetch: FetchLike; authorizations: string[]; urls: string[] } {
@@ -27,8 +27,6 @@ function silentClient(pool: RoundRobinKeyPool, fetch: FetchLike, lines: string[]
 
 const context7 = { id: "/upstash/context7", title: "Context7", description: "docs" };
 const truefoundry = { id: "/truefoundry/context7-mcp-server", title: "Context7 MCP Server", description: "mcp" };
-const stripe = { id: "/websites/stripe", title: "Stripe", description: "payments" };
-const fastapi = { id: "/websites/fastapi", title: "FastAPI", description: "api" };
 
 describe("Context7ApiClient query-docs rotation", () => {
   it("balances ordinary calls between the two keys", async () => {
@@ -160,30 +158,24 @@ describe("Context7ApiClient query-docs error codes", () => {
   });
 });
 
-describe("Context7ApiClient resolve-library-id across both keys", () => {
-  it("asks both keys and returns the same merged answer whichever key's turn it is", async () => {
-    const filtered = { searchFilterApplied: true, results: [stripe, fastapi] };
-    const open = { searchFilterApplied: true, results: [context7, truefoundry] };
+describe("Context7ApiClient resolve-library-id rotation", () => {
+  it("searches with one key per call, taking turns with query-docs", async () => {
     const mock = fakeFetch([
-      () => Response.json(filtered),
-      () => Response.json(open),
+      () => Response.json({ results: [context7] }),
       () => new Response("docs", { status: 200 }),
-      () => Response.json(filtered),
-      () => Response.json(open),
+      () => Response.json({ results: [context7] }),
     ]);
     const client = silentClient(new RoundRobinKeyPool(["one", "two"]), mock.fetch);
 
-    const first = await client.searchLibraries("docs", "Context7");
+    await expect(client.searchLibraries("docs", "Context7")).resolves.toEqual({ results: [context7] });
     await client.fetchLibraryContext("q", "/upstash/context7");
-    const second = await client.searchLibraries("docs", "Context7");
+    await client.searchLibraries("docs", "Context7");
 
-    expect(first).toEqual(second);
-    expect(first.results?.map((result) => result.id)).toEqual([stripe.id, context7.id, fastapi.id, truefoundry.id]);
-    expect(mock.authorizations).toEqual(["Bearer one", "Bearer two", "Bearer one", "Bearer one", "Bearer two"]);
+    expect(mock.authorizations).toEqual(["Bearer one", "Bearer two", "Bearer one"]);
     expect(mock.urls[0]).toBe("https://context7.com/api/v2/libs/search?query=docs&libraryName=Context7");
   });
 
-  it("returns the other key's results when one key is blocked, and cools a rate-limited key", async () => {
+  it("retries once on the other key when the first is blocked, and cools a rate-limited key", async () => {
     const clock = clockAt(0);
     const pool = new RoundRobinKeyPool(["one", "two"], clock.now);
     const mock = fakeFetch([
@@ -193,52 +185,29 @@ describe("Context7ApiClient resolve-library-id across both keys", () => {
     ]);
     const client = silentClient(pool, mock.fetch);
 
-    await expect(client.searchLibraries("docs", "Context7")).resolves.toEqual({ results: [context7], searchFilterApplied: false });
-    await expect(client.searchLibraries("docs", "Context7")).resolves.toEqual({ results: [truefoundry], searchFilterApplied: false });
+    await expect(client.searchLibraries("docs", "Context7")).resolves.toEqual({ results: [context7] });
+    await expect(client.searchLibraries("docs", "Context7")).resolves.toEqual({ results: [truefoundry] });
 
     expect(mock.authorizations).toEqual(["Bearer one", "Bearer two", "Bearer two"]);
   });
 
-  it("falls back to a cooling key only when every available key fails", async () => {
-    const clock = clockAt(0);
-    const pool = new RoundRobinKeyPool(["one", "two"], clock.now);
-    pool.coolDown({ index: 0, value: "one" }, 30_000);
+  it("retries a search the first key's teamspace is not allowed to make on the other key", async () => {
     const mock = fakeFetch([
-      () => new Response("forbidden", { status: 403 }),
+      () => Response.json({ error: "access_denied", message: "denied" }, { status: 403 }),
       () => Response.json({ results: [context7] }),
-    ]);
-    const client = silentClient(pool, mock.fetch);
-
-    await expect(client.searchLibraries("docs", "Context7")).resolves.toEqual({ results: [context7], searchFilterApplied: false });
-    expect(mock.authorizations).toEqual(["Bearer two", "Bearer one"]);
-  });
-
-  it("fails with the upstream error when every key fails", async () => {
-    const mock = fakeFetch([
-      () => new Response("upstream error", { status: 500 }),
-      () => new Response("upstream error", { status: 500 }),
     ]);
     const client = silentClient(new RoundRobinKeyPool(["one", "two"]), mock.fetch);
 
-    await expect(client.searchLibraries("docs", "FastMCP")).rejects.toMatchObject({ status: 500 });
+    await expect(client.searchLibraries("docs", "Context7")).resolves.toEqual({ results: [context7] });
     expect(mock.authorizations).toEqual(["Bearer one", "Bearer two"]);
   });
 
-  it("logs which slot saw results the other did not, without key values", async () => {
-    const lines: string[] = [];
-    const mock = fakeFetch([
-      () => Response.json({ searchFilterApplied: true, results: [stripe, context7] }),
-      () => Response.json({ searchFilterApplied: true, results: [context7, truefoundry] }),
-      () => Response.json({ results: [context7] }),
-      () => Response.json({ results: [context7] }),
-    ]);
-    const client = silentClient(new RoundRobinKeyPool(["secret-one", "secret-two"]), mock.fetch, lines);
+  it("fails with the upstream error without a retry when it is not a key problem", async () => {
+    const mock = fakeFetch([() => new Response("upstream error", { status: 500 })]);
+    const client = silentClient(new RoundRobinKeyPool(["one", "two"]), mock.fetch);
 
-    await client.searchLibraries("docs", "Context7");
-    await client.searchLibraries("docs", "Context7");
-
-    expect(lines).toEqual(["Context7 search results differ by slot: slot 0 alone returned 1, slot 1 alone returned 1"]);
-    expect(lines.join("\n")).not.toContain("secret");
+    await expect(client.searchLibraries("docs", "FastMCP")).rejects.toMatchObject({ status: 500 });
+    expect(mock.authorizations).toEqual(["Bearer one"]);
   });
 });
 
@@ -256,26 +225,6 @@ describe("redirectTarget", () => {
     expect(redirectTarget("/a//")).toBeUndefined();
     expect(redirectTarget("https://evil.example/a/b")).toBeUndefined();
     expect(redirectTarget("https://context7.com/a/b?tokens=1")).toBeUndefined();
-  });
-});
-
-describe("mergeSearchResponses", () => {
-  it("interleaves by rank in slot order and removes duplicates", () => {
-    const merged = mergeSearchResponses([
-      { results: [stripe, context7, fastapi] },
-      { results: [context7, truefoundry] },
-    ]);
-
-    expect(merged.results?.map((result) => result.id)).toEqual([stripe.id, context7.id, truefoundry.id, fastapi.id]);
-  });
-
-  it("reports a filter only when every key applied one", () => {
-    expect(mergeSearchResponses([{ searchFilterApplied: true, results: [] }, { searchFilterApplied: true, results: [] }]).searchFilterApplied).toBe(true);
-    expect(mergeSearchResponses([{ searchFilterApplied: true, results: [] }, { results: [] }]).searchFilterApplied).toBe(false);
-  });
-
-  it("handles responses without results", () => {
-    expect(mergeSearchResponses([{}, {}])).toEqual({ results: [], searchFilterApplied: false });
   });
 });
 
