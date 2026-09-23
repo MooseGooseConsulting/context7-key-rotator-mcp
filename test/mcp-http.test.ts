@@ -1,7 +1,7 @@
 import type { Server } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import { Context7ApiClient, type FetchLike } from "../src/context7-api.js";
-import { createHttpMcpServer } from "../src/http-server.js";
+import { createHttpMcpServer, type HttpServerOptions } from "../src/http-server.js";
 import { RoundRobinKeyPool } from "../src/key-pool.js";
 
 const protocolVersion = "2026-07-28";
@@ -42,8 +42,8 @@ function createApi(): Context7ApiClient {
   return new Context7ApiClient(new RoundRobinKeyPool(["one", "two"]), fetchImpl);
 }
 
-async function startServer(api = createApi()): Promise<string> {
-  const server = createHttpMcpServer(api);
+async function startServer(api = createApi(), options: HttpServerOptions = {}): Promise<string> {
+  const server = createHttpMcpServer(api, options);
   servers.push(server);
   await new Promise<void>((resolve, reject) => {
     const onError = (error: Error) => reject(error);
@@ -117,5 +117,55 @@ describe("Streamable HTTP MCP endpoint", () => {
 
     expect(response.result.isError).toBe(true);
     expect(response.result.content[0].text).toBe("both keys blocked");
+  });
+
+  it("records one event per tool call with the caller, arguments, and every upstream attempt", async () => {
+    const fetchImpl: FetchLike = async (url) => {
+      const path = new URL(url).pathname;
+      const headers = { "RateLimit-Limit": "1000", "RateLimit-Remaining": "570" };
+      if (path === "/api/v2/libs/search") return Response.json({ results: [{ id: "/a/b", title: "B", description: "" }] }, { headers });
+      return Response.json({ error: "no_relevant_snippets", message: "No documentation matched." }, { status: 404, headers });
+    };
+    const api = new Context7ApiClient(new RoundRobinKeyPool(["secret-one", "secret-two"]), fetchImpl, () => {});
+    const events: Array<Record<string, any>> = [];
+    const endpoint = await startServer(api, { record: (event) => events.push(event) });
+
+    await postMcp(endpoint, "tools/call", 5, "resolve-library-id", { libraryName: "B", query: "setup" });
+    await postMcp(endpoint, "tools/call", 6, "query-docs", { libraryId: "/a/b", query: "setup" });
+
+    expect(events).toHaveLength(2);
+    expect(events[0]).toMatchObject({
+      event: "tool_call", tool: "resolve-library-id", libraryName: "B", query: "setup", outcome: "ok", resultCount: 1, upstreamCalls: 1,
+    });
+    expect(events[0].attempts.map((attempt: Record<string, unknown>) => attempt.slot)).toEqual([0]);
+    expect(events[1].attempts.map((attempt: Record<string, unknown>) => attempt.slot)).toEqual([1]);
+    expect(events[0].attempts[0]).toMatchObject({ endpoint: "search", status: 200, rateLimitLimit: 1000, rateLimitRemaining: 570 });
+    expect(events[1]).toMatchObject({
+      tool: "query-docs", libraryId: "/a/b", outcome: "error", errorStatus: 404, errorCode: "no_relevant_snippets", errorMessage: "No documentation matched.", upstreamCalls: 1,
+    });
+    expect(events[1].attempts[0]).toMatchObject({ endpoint: "context", status: 404, code: "no_relevant_snippets" });
+    expect(events[0].requestId).not.toBe(events[1].requestId);
+    expect(typeof events[0].userAgent).toBe("string");
+    expect(JSON.stringify(events)).not.toContain("secret");
+  });
+
+  it("records a followed redirect and an empty answer on the call that saw them", async () => {
+    let contextCalls = 0;
+    const fetchImpl: FetchLike = async (url) => {
+      if (new URL(url).searchParams.get("libraryId") === "/old/lib" && contextCalls++ === 0) {
+        return Response.json({ error: "library_redirected", redirectUrl: "/new/lib" }, { status: 301 });
+      }
+      return new Response("");
+    };
+    const api = new Context7ApiClient(new RoundRobinKeyPool(["one", "two"]), fetchImpl, () => {});
+    const events: Array<Record<string, any>> = [];
+    const endpoint = await startServer(api, { record: (event) => events.push(event) });
+
+    await postMcp(endpoint, "tools/call", 7, "query-docs", { libraryId: "/old/lib", query: "setup" });
+    await postMcp(endpoint, "tools/call", 8, "query-docs", { libraryId: "/new/lib", query: "setup" });
+
+    expect(events[0]).toMatchObject({ redirectedTo: "/new/lib", outcome: "empty", upstreamCalls: 2 });
+    expect(events[1].redirectedTo).toBeUndefined();
+    expect(events[1].upstreamCalls).toBe(1);
   });
 });
