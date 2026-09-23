@@ -26,6 +26,10 @@ export class Context7ApiError extends Error {
     message: string,
     public readonly status: number,
     public readonly retryAfterMs?: number,
+    /** The `error` field of Context7's JSON error body, e.g. `library_not_found`. */
+    public readonly code?: string,
+    /** The `redirectUrl` field of a `301 library_redirected` body. */
+    public readonly redirectUrl?: string,
   ) {
     super(message);
   }
@@ -37,10 +41,23 @@ export class Context7ApiError extends Error {
   /**
    * Context7 answers a documentation request for a library hidden by the key's
    * teamspace library filters with the same "not found" as an unindexed library,
-   * so a 404 is worth one attempt on the other key.
+   * so that 404 is worth one attempt on the other key. Other 404s, such as
+   * `no_relevant_snippets` (the library exists but nothing matched the query),
+   * would get the same answer from either key.
    */
   public get isNotFound(): boolean {
-    return this.status === 404;
+    return this.status === 404 && (this.code === undefined || this.code === "library_not_found");
+  }
+}
+
+type ErrorBody = { error?: unknown; message?: unknown; redirectUrl?: unknown };
+
+function parseErrorBody(text: string): ErrorBody {
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return parsed && typeof parsed === "object" ? (parsed as ErrorBody) : {};
+  } catch {
+    return {};
   }
 }
 
@@ -91,7 +108,25 @@ export class Context7ApiClient {
     return this.withEveryKey(async (key) => (await this.fetchResponse(url, key)).json() as Promise<SearchResponse>);
   }
 
+  /**
+   * Fetches documentation, following one `301 library_redirected` to the
+   * library ID Context7 names in `redirectUrl` (it sends no Location header, so
+   * fetch cannot follow it), and says so at the top of the result.
+   */
   public async fetchLibraryContext(query: string, libraryId: string): Promise<string> {
+    try {
+      return await this.fetchLibraryContextOnce(query, libraryId);
+    } catch (error) {
+      if (!(error instanceof Context7ApiError) || error.status !== 301 || !error.redirectUrl || error.redirectUrl === libraryId) {
+        throw error;
+      }
+      this.log(`Context7 library ${libraryId} redirected to ${error.redirectUrl}`);
+      const text = await this.fetchLibraryContextOnce(query, error.redirectUrl);
+      return `Note: Context7 library ${libraryId} has moved to ${error.redirectUrl}; use that ID from now on.\n\n${text}`;
+    }
+  }
+
+  private async fetchLibraryContextOnce(query: string, libraryId: string): Promise<string> {
     const url = new URL(`${API_BASE_URL}/v2/context`);
     url.searchParams.set("query", query);
     url.searchParams.set("libraryId", libraryId);
@@ -185,10 +220,13 @@ export class Context7ApiClient {
     }
 
     const detail = await response.text();
+    const body = parseErrorBody(detail);
     throw new Context7ApiError(
       detail || `Context7 request failed with status ${response.status}.`,
       response.status,
       parseRetryAfterMs(response.headers.get("retry-after"), this.keyPool.now()),
+      typeof body.error === "string" ? body.error : undefined,
+      typeof body.redirectUrl === "string" ? body.redirectUrl : undefined,
     );
   }
 }
