@@ -17,11 +17,11 @@ It is published as the tailnet service `svc:context7` and is reachable only from
 
 `CONTEXT7_API_KEYS` must contain exactly two comma-separated keys. A process starts with slot 0, then selects slot 1, then slot 0 again for successive upstream operations. If the selected slot is cooling down after a `429` and the other slot is not, the other slot is used instead. The counter and cooldowns are process-local and are reset when the container restarts.
 
-`tools/list` is local MCP metadata: it never calls Context7 and never advances the key selector. Each `query-docs` call makes one logical Context7 operation on the next slot. Each `resolve-library-id` call asks every slot that is not cooling down, in parallel, and does not advance the selector; see [Keys with different library filters](#keys-with-different-library-filters).
+`tools/list` is local MCP metadata: it never calls Context7 and never advances the key selector. Each `resolve-library-id` and each `query-docs` call makes one logical Context7 operation on the next slot, so searches and documentation requests share one rotation.
 
 ```mermaid
 flowchart TD
-    A[Client calls query-docs] --> B[Validate MCP arguments]
+    A[Client calls resolve-library-id or query-docs] --> B[Validate MCP arguments]
     B --> C[Select next key slot]
     C --> D[Advance ordinary round-robin pointer; skip a cooling slot]
     D --> E[Call Context7 V2 API]
@@ -36,19 +36,14 @@ The fallback does **not** advance the ordinary round-robin pointer a second time
 
 Only `401`, `403`, `404`, and `429` cause an alternate-key retry. A `500`, malformed upstream response, network failure, or timeout is returned as a tool error without a retry because it is not evidence that the selected key is the problem.
 
-### Keys with different library filters
+### Library filters and Context7 error codes
 
-Each Context7 key belongs to a teamspace whose [library filters](https://context7.com/dashboard?tab=policies) decide which libraries it can see. A hidden library is left out of search results, and a documentation request for it gets the same `404` as a library that does not exist. When the two keys belong to teamspaces with different filters, one key can find a library the other cannot.
+Each Context7 key belongs to a teamspace whose [library filters](https://context7.com/dashboard?tab=policies) decide which libraries it can see. Both teamspaces are set to the same filters, so either key gives the same answer. Keep them identical: if they differ, what a search returns depends on whose turn it is.
 
-The rotator makes the answer independent of whose turn it is:
-
-- `resolve-library-id` searches with both slots in parallel and merges the results: interleaved by rank in slot order and de-duplicated by library ID. Every call sees every library that either teamspace allows. The filter note is shown only if both slots applied a filter. A slot that is cooling down is skipped, and is asked only if every available slot fails. If one slot fails, the other slot's results are returned alone.
-- `query-docs` stays round-robin. A hidden library announces itself with `403 access_denied` or `404 library_not_found`, and those are retried once on the other slot. `404 no_relevant_snippets` means the library exists but nothing matched the query; either key would answer it the same way, so it is returned without a retry.
+- A hidden library announces itself with `403 access_denied` or `404 library_not_found`, and those are retried once on the other slot. `404 no_relevant_snippets` means the library exists but nothing matched the query; either key would answer it the same way, so it is returned without a retry.
 - A `301 library_redirected` carries the new library ID in its JSON `redirectUrl` field and no `Location` header. `query-docs` follows it once and starts its answer with a note naming the new ID (for example `/facebook/react` now answers from `/react/react`). A `redirectUrl` that is not a library ID (`/owner/project[/version]`, or a `context7.com` URL with that path and no query) is not followed, and the `301` is returned as an error.
 
-Searching with both slots doubles the upstream search calls. Documentation calls, which carry most of the payload, are still spread across the slots.
-
-When the slots' search results differ, one stderr line records how many results each slot returned alone (for example `Context7 search results differ by slot: slot 0 alone returned 1, slot 1 alone returned 1`). Cooldowns and retries are logged the same way. Logs name slot indexes, never keys. If those lines keep appearing, the two teamspaces' filters differ, and aligning them in the dashboard removes the difference at its source.
+Cooldowns and retries are logged to stderr by slot index, never by key.
 
 ### Rate-limit cooldown
 
@@ -166,6 +161,6 @@ npm run build
 docker compose -f deploy/compose.yaml up -d --build
 ```
 
-The automated suite is deterministic: it mocks Context7 V2 responses and verifies MCP protocol handling, tool discovery, result formatting, normal alternation, alternate-key retry for `401`/`403`/`404`/`429`, Context7 error codes and redirects, request records, two-slot search merging, `Retry-After` cooldowns, both-key failure, and integration-test server lifecycle. Green automated tests do **not** prove the current upstream service or credentials work.
+The automated suite is deterministic: it mocks Context7 V2 responses and verifies MCP protocol handling, tool discovery, result formatting, normal alternation, alternate-key retry for `401`/`403`/`404`/`429`, Context7 error codes and redirects, request records, `Retry-After` cooldowns, both-key failure, and integration-test server lifecycle. Green automated tests do **not** prove the current upstream service or credentials work.
 
 Live validation is separate. Use a real client or a protocol client to verify `tools/list`, then call `resolve-library-id` and `query-docs` with a real library. A valid result has an actual Context7 library ID, nonempty documentation, and source links or code/documentation content appropriate to the request.

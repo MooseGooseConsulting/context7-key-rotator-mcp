@@ -94,29 +94,6 @@ export const DOCS_NOT_FOUND = "Documentation not found or not finalized for this
 
 export type FetchLike = typeof fetch;
 
-/**
- * Merges search responses from different keys in slot order. Results are
- * interleaved by rank and de-duplicated by library ID, so a library visible to
- * either key's teamspace appears no matter which key's turn it is. The merged
- * response only reports a filter when every contributing key applied one.
- */
-export function mergeSearchResponses(responses: readonly SearchResponse[]): SearchResponse {
-  const lists = responses.map((response) => response.results ?? []);
-  const longest = Math.max(0, ...lists.map((list) => list.length));
-  const seen = new Set<string>();
-  const results: SearchResult[] = [];
-  for (let rank = 0; rank < longest; rank += 1) {
-    for (const list of lists) {
-      const result = list[rank];
-      if (result && !seen.has(result.id)) {
-        seen.add(result.id);
-        results.push(result);
-      }
-    }
-  }
-  return { results, searchFilterApplied: responses.length > 0 && responses.every((response) => response.searchFilterApplied) };
-}
-
 export function parseRetryAfterMs(value: string | null, now: number): number | undefined {
   if (!value) return undefined;
   const trimmed = value.trim();
@@ -136,7 +113,7 @@ export class Context7ApiClient {
     const url = new URL(`${API_BASE_URL}/v2/libs/search`);
     url.searchParams.set("query", query);
     url.searchParams.set("libraryName", libraryName);
-    return this.withEveryKey(async (lease) => JSON.parse(await this.fetchText(url, lease, "search")) as SearchResponse);
+    return this.withBalancedKey(async (lease) => JSON.parse(await this.fetchText(url, lease, "search")) as SearchResponse);
   }
 
   /**
@@ -165,40 +142,6 @@ export class Context7ApiClient {
       const text = await this.fetchText(url, lease, "context");
       return text || DOCS_NOT_FOUND;
     });
-  }
-
-  /**
-   * Searches with every key that is not cooling down, in parallel, and merges
-   * the answers, so what a caller sees does not depend on whose turn it is when
-   * the keys' teamspaces filter libraries differently. Keys skipped for a
-   * cooldown are tried only if every available key failed.
-   */
-  private async withEveryKey(operation: (lease: KeyLease) => Promise<SearchResponse>): Promise<SearchResponse> {
-    const leases = this.keyPool.leases();
-    const available = leases.filter((lease) => !this.keyPool.isCoolingDown(lease.index));
-    const cooling = leases.filter((lease) => this.keyPool.isCoolingDown(lease.index));
-    const answered: Array<{ lease: KeyLease; response: SearchResponse }> = [];
-    const failures: unknown[] = [];
-
-    for (const batch of available.length ? [available, cooling] : [cooling]) {
-      const settled = await Promise.allSettled(batch.map((lease) => this.attempt(lease, operation)));
-      settled.forEach((outcome, position) => {
-        if (outcome.status === "fulfilled") answered.push({ lease: batch[position], response: outcome.value });
-        else failures.push(outcome.reason);
-      });
-      if (answered.length) break;
-    }
-
-    if (!answered.length) throw failures[0];
-    if (answered.length > 1) this.logSearchDivergence(answered);
-    return mergeSearchResponses(answered.map(({ response }) => response));
-  }
-
-  private logSearchDivergence(answered: ReadonlyArray<{ lease: KeyLease; response: SearchResponse }>): void {
-    const ids = answered.map(({ response }) => new Set((response.results ?? []).map((result) => result.id)));
-    const unique = ids.map((own, position) => [...own].filter((id) => ids.every((other, index) => index === position || !other.has(id))).length);
-    if (unique.every((count) => count === 0)) return;
-    this.log(`Context7 search results differ by slot: ${answered.map(({ lease }, position) => `slot ${lease.index} alone returned ${unique[position]}`).join(", ")}`);
   }
 
   /**
