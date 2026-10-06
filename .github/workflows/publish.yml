@@ -8,8 +8,7 @@ on:
   push:
     branches:
       - main
-  pull_request:
-    paths:
+    paths: &image-inputs
       # Every input the image build reads: the Dockerfile, what .dockerignore
       # leaves it, the manifest that feeds npm ci, and the sources it copies.
       - .github/workflows/publish.yml
@@ -19,6 +18,8 @@ on:
       - package-lock.json
       - tsconfig.json
       - src/**
+  pull_request:
+    paths: *image-inputs
   workflow_dispatch:
 
 permissions:
