@@ -5,7 +5,7 @@
   "description": "A stateless HTTP MCP server for Context7 V2 with balanced API-key rotation.",
   "type": "module",
   "engines": {
-    "node": ">=20.18.1"
+    "node": ">=26.13.1"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -21,9 +21,9 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
-    "@types/node": "^24.0.0",
+    "@types/node": "^26.6.6",
     "tsx": "^4.0.0",
     "typescript": "7.0.2",
-    "vitest": "4.1.11"
+    "vitest": "5.1.0"
   }
 }
