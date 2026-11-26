@@ -1,9 +1,10 @@
 # Context7 Key Rotator MCP
 
-A small remote [Model Context Protocol](https://modelcontextprotocol.io/) server for Context7 V2. It presents one Streamable HTTP MCP endpoint and exactly two tools:
+A small remote [Model Context Protocol](https://modelcontextprotocol.io/) server for Context7 V2. It presents one Streamable HTTP MCP endpoint and three tools:
 
 - `resolve-library-id(libraryName, query)`
 - `query-docs(libraryId, query)`
+- `context7-usage()`: each key's requests this month, its plan allowance and the reset date, from Context7's `GET /api/v2/usage` (which does not count as a request). Keys are named by slot index only.
 
 The deployed endpoint is:
 
@@ -114,38 +115,21 @@ The rotator previously ran on the physical Bloodarrow host from a checkout at `/
 
 ## Client registration
 
-Every installed native client uses one remote server named `context7`, whose target is the HTTPS endpoint above. The active registrations contain no bearer headers, API keys, stdio bridge, or direct `context7.com` MCP URL.
+Context7's own CLI writes each agent's entry. The server answers `GET /api/auth/mcp` with `{"enabled": false}`, so `ctx7 setup` writes a plain HTTP entry for `<base>/mcp` with no key:
 
-| Client | Active registration |
-| --- | --- |
-| Codex | `C:\Users\pmacl\.codex\config.toml` |
-| Claude Code | `C:\Users\pmacl\.claude.json` |
-| Cursor | `C:\Users\pmacl\.cursor\mcp.json` |
-| VS Code Insiders | `C:\Users\pmacl\AppData\Roaming\Code - Insiders\User\mcp.json` |
-| Kilo | `C:\Users\pmacl\.config\kilo\kilo.json` |
-| OpenCode | `C:\Users\pmacl\.config\opencode\opencode.json` |
-| GitHub Copilot CLI | `C:\Users\pmacl\.copilot\mcp-config.json` |
-| Qwen Code | `C:\Users\pmacl\.qwen\settings.json` |
-| Antigravity | `C:\Users\pmacl\.gemini\config\mcp_config.json` |
-| Goose | `C:\Users\pmacl\AppData\Roaming\Block\goose\config\config.yaml` |
-
-Start a fresh client session after changing a registration. The successful client-side discovery criterion is exactly these two tools:
-
-```
-resolve-library-id
-query-docs
+```sh
+npx ctx7@0.13.0 setup --mcp --yes \
+  --base-url https://context7.tyrannosaurus-magellanic.ts.net \
+  --claude --codex --copilot --devin --antigravity
 ```
 
-Claude Desktop has no active Context7 registration, so there was no direct entry to replace. Amp was uninstalled and is not a configured client. Timestamped configuration backups may retain prior settings for recovery, but they are not loaded by the clients.
+It also supports `--cursor`, `--opencode`, `--gemini`, `--vscode`, `--vscode-insiders` and `--pi`, and `ctx7 remove --<agent> --mcp` undoes it. Besides the MCP entry it installs a short Context7 usage rule and a `context7-mcp` skill for each agent (for Codex, a section appended to `~/.codex/AGENTS.md`). Agents ctx7 does not know, such as Kilo, need the entry in their own config:
 
-For Codex, the active registration was replaced using its native CLI:
-
-```powershell
-codex mcp remove context7
-codex mcp add context7 --url https://context7.tyrannosaurus-magellanic.ts.net/mcp
+```json
+"mcp": { "context7": { "type": "remote", "url": "https://context7.tyrannosaurus-magellanic.ts.net/mcp", "enabled": true } }
 ```
 
-Clients registered against the old Bloodarrow URL keep working until that stack is drained; repoint each one at the URL above when it next needs a change.
+Start a fresh client session after changing a registration; it should list the three tools above.
 
 ## Local development and validation
 
