@@ -3,6 +3,7 @@
 .workflow
 node_modules
 dist
+dist-installer
 test
 coverage
 Dockerfile

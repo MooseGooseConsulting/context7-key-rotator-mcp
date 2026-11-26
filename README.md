@@ -1,10 +1,13 @@
 # Context7 Key Rotator MCP
 
-A small remote [Model Context Protocol](https://modelcontextprotocol.io/) server for Context7 V2. It presents one Streamable HTTP MCP endpoint and three tools:
+A small remote [Model Context Protocol](https://modelcontextprotocol.io/) server for Context7 V2. It serves Upstash's Context7 MCP tools over one Streamable HTTP endpoint and spreads their upstream calls over two API keys:
 
-- `resolve-library-id(libraryName, query)`
-- `query-docs(libraryId, query)`
-- `context7-usage()`: each key's requests this month, its plan allowance and the reset date, from Context7's `GET /api/v2/usage` (which does not count as a request). Keys are named by slot index only.
+- `resolve-library-id(libraryName, query)` and `query-docs(libraryId, query, language?, version?)`: documentation lookup.
+- `get-upgrade-guide(libraryId, fromVersion, toVersion?, page?)`: what changes between two versions of a library.
+- `grep-code`, `glob-code`, `read-code`, `find-symbol`: search a library's source at the version its docs describe.
+- `context7-usage()`: each key's requests this month, its plan allowance, the reset date, and which experimental tools its teamspace has on. Keys are named by slot index only.
+
+The tool schemas, descriptions and server instructions are copied from [upstash/context7](https://github.com/upstash/context7) `packages/mcp` (MIT; see [`src/upstream/`](src/upstream/)). Upstream's `submit-docs-feedback` is left out: it only sends ratings to Context7. The upgrade guide and code tools are experimental upstream and answer only for a key whose teamspace has them turned on in the [dashboard](https://context7.com/dashboard?tab=settings); keep both teamspaces the same, and check with `context7-usage`.
 
 The deployed endpoint is:
 
@@ -18,7 +21,7 @@ It is published as the tailnet service `svc:context7` and is reachable only from
 
 `CONTEXT7_API_KEYS` must contain exactly two comma-separated keys. A process starts with slot 0, then selects slot 1, then slot 0 again for successive upstream operations. If the selected slot is cooling down after a `429` and the other slot is not, the other slot is used instead. The counter and cooldowns are process-local and are reset when the container restarts.
 
-`tools/list` is local MCP metadata: it never calls Context7 and never advances the key selector. Each `resolve-library-id` and each `query-docs` call makes one logical Context7 operation on the next slot, so searches and documentation requests share one rotation.
+`tools/list` is local MCP metadata: it never calls Context7 and never advances the key selector. Each documentation, upgrade-guide and code tool call makes one logical Context7 operation on the next slot, so they all share one rotation. `context7-usage` asks both keys.
 
 ```mermaid
 flowchart TD
@@ -115,21 +118,17 @@ The rotator previously ran on the physical Bloodarrow host from a checkout at `/
 
 ## Client registration
 
-Context7's own CLI writes each agent's entry. The server answers `GET /api/auth/mcp` with `{"enabled": false}`, so `ctx7 setup` writes a plain HTTP entry for `<base>/mcp` with no key:
+The server serves its own installer at `GET /install.mjs`, built into the image with it, so the entry and skill it installs match the tools this build serves. On any machine on the tailnet with Node:
 
 ```sh
-npx ctx7@0.13.0 setup --mcp --yes \
-  --base-url https://context7.tyrannosaurus-magellanic.ts.net \
-  --claude --codex --copilot --devin --antigravity
+curl -fsSo install.mjs https://context7.tyrannosaurus-magellanic.ts.net/install.mjs
+node install.mjs          # check: read-only report
+node install.mjs apply    # register, remove conflicts, install the skill
 ```
 
-It also supports `--cursor`, `--opencode`, `--gemini`, `--vscode`, `--vscode-insiders` and `--pi`, and `ctx7 remove --<agent> --mcp` undoes it. Besides the MCP entry it installs a short Context7 usage rule and a `context7-mcp` skill for each agent (for Codex, a section appended to `~/.codex/AGENTS.md`). Agents ctx7 does not know, such as Kilo, need the entry in their own config:
+See [installer/README.md](installer/README.md). The agents it knows, and what it treats as a conflict, are in [installer/core.ts](installer/core.ts). The skill it installs is Upstash's own, copied unchanged into [skills/](skills/).
 
-```json
-"mcp": { "context7": { "type": "remote", "url": "https://context7.tyrannosaurus-magellanic.ts.net/mcp", "enabled": true } }
-```
-
-Start a fresh client session after changing a registration; it should list the three tools above.
+Start a fresh client session after a change; it should list the tools above.
 
 ## Local development and validation
 

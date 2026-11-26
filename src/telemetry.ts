@@ -4,7 +4,7 @@ import { pino, transport as pinoTransport, type Logger } from "pino";
 /** One upstream Context7 call made while serving a tool call. */
 export type UpstreamAttempt = {
   slot: number;
-  endpoint: "search" | "context" | "usage";
+  endpoint: "search" | "context" | "usage" | "experimental-tools" | "code" | "upgrade-guide";
   status: number | "network_error";
   code?: string;
   durationMs: number;
