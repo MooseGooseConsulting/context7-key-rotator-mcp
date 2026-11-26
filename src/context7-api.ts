@@ -1,5 +1,27 @@
 import { type KeyLease, RoundRobinKeyPool } from "./key-pool.js";
 import { noteRedirect, parseUrl, recordAttempt, type UpstreamAttempt } from "./telemetry.js";
+import type { CodeRequest } from "./upstream/types.js";
+
+/** A 2xx upstream answer. A 202 ("being indexed", "being prepared") is an answer too. */
+export type UpstreamReply = { status: number; text: string };
+
+/** Options `query-docs` passes through to `/v2/context`. */
+export type DocsOptions = { language?: string; version?: string };
+
+/** The `get-upgrade-guide` request, sent to `/v2/version-upgrade-guide`. */
+export type UpgradeGuideRequest = { libraryId: string; fromVersion: string; toVersion?: string; page?: number };
+
+/**
+ * Seconds a code tool request lets the API wait for an index before it answers "being indexed"
+ * (upstream's CODE_INDEX_WAIT_SECONDS): the agent goes on with query-docs instead of waiting.
+ */
+const CODE_INDEX_WAIT_SECONDS = 5;
+
+/**
+ * Sent on every documentation and source request. Upstream's server sends them when the
+ * experimental tools are on; this server always lists them, so an answer may point at them.
+ */
+const EXPERIMENTAL_HEADERS = { "X-Context7-Experimental": "1", "X-Context7-Code-Tools": "1" };
 
 function headerNumber(headers: Headers, name: string): number | undefined {
   const value = headers.get(name);
@@ -21,6 +43,7 @@ export type SearchResult = {
   trustScore?: number;
   benchmarkScore?: number;
   versions?: string[];
+  branch?: string;
   source?: string;
 };
 
@@ -29,8 +52,23 @@ export type SearchResponse = {
   searchFilterApplied?: boolean;
 };
 
-/** One key's answer from `GET /api/v2/usage`, or why it could not be read. */
-export type SlotUsage = { slot: number; usage?: Record<string, unknown>; error?: string };
+/**
+ * One key's answer from `GET /api/v2/usage`, or why it could not be read, and which
+ * experimental tools its teamspace has turned on (`GET /api/v2/mcp/experimental-tools`).
+ */
+export type SlotUsage = {
+  slot: number;
+  usage?: Record<string, unknown>;
+  error?: string;
+  experimental?: { all?: boolean; tools?: string[] };
+  experimentalError?: string;
+};
+
+/** A lookup failure as one short line: the message, plus the HTTP status for an API error. */
+function failureText(error: unknown): string {
+  const status = error instanceof Context7ApiError ? ` (HTTP ${error.status})` : "";
+  return `${error instanceof Error ? error.message : String(error)}${status}`.slice(0, 300);
+}
 
 export class Context7ApiError extends Error {
   public constructor(
@@ -125,19 +163,69 @@ export class Context7ApiClient {
    * not the next in rotation, and the call does not count as a request.
    */
   public async usage(): Promise<SlotUsage[]> {
-    const url = new URL(`${API_BASE_URL}/v2/usage`);
-    url.searchParams.set("days", "1");
+    const usageUrl = new URL(`${API_BASE_URL}/v2/usage`);
+    usageUrl.searchParams.set("days", "1");
+    const experimentalUrl = new URL(`${API_BASE_URL}/v2/mcp/experimental-tools`);
     return Promise.all(this.keyPool.all().map(async (lease) => {
-      try {
-        const parsed: unknown = JSON.parse(await this.fetchText(url, lease, "usage"));
-        return parsed && typeof parsed === "object"
-          ? { slot: lease.index, usage: parsed as Record<string, unknown> }
-          : { slot: lease.index, error: "Context7 returned a usage response that is not a JSON object." };
-      } catch (error) {
-        const status = error instanceof Context7ApiError ? ` (HTTP ${error.status})` : "";
-        return { slot: lease.index, error: `${error instanceof Error ? error.message : String(error)}${status}`.slice(0, 300) };
+      const slot: SlotUsage = { slot: lease.index };
+      const [usage, experimental] = await Promise.allSettled([
+        this.fetchJson(usageUrl, lease, "usage", {}),
+        this.fetchJson(experimentalUrl, lease, "experimental-tools", {}),
+      ]);
+      if (usage.status === "fulfilled") slot.usage = usage.value;
+      else slot.error = failureText(usage.reason);
+      if (experimental.status === "fulfilled") {
+        const { all, tools } = experimental.value;
+        slot.experimental = {
+          all: all === true,
+          tools: Array.isArray(tools) ? tools.filter((tool): tool is string => typeof tool === "string") : [],
+        };
+      } else {
+        slot.experimentalError = failureText(experimental.reason);
       }
+      return slot;
     }));
+  }
+
+  /**
+   * One `/v2/code` call for a code tool, on the next key with the usual fallback. A 202 means
+   * the source is still being indexed; the caller turns it into an answer.
+   */
+  public async fetchCode(request: CodeRequest): Promise<UpstreamReply> {
+    const url = new URL(`${API_BASE_URL}/v2/code`);
+    url.searchParams.set("libraryId", request.libraryId);
+    // An agent may copy a full versioned ID ("/vercel/next.js/v15.1.8") into version.
+    const version = request.version?.startsWith(`${request.libraryId}/`)
+      ? request.version.slice(request.libraryId.length + 1)
+      : request.version;
+    if (version) url.searchParams.set("version", version);
+    if (request.operation) url.searchParams.set("operation", request.operation);
+    if (request.pattern !== undefined) url.searchParams.set("pattern", request.pattern);
+    if (request.fixed_strings) url.searchParams.set("fixed_strings", "true");
+    if (request.ignore_case) url.searchParams.set("ignore_case", "true");
+    for (const glob of [request.glob ?? []].flat()) url.searchParams.append("glob", glob);
+    if (request.path) url.searchParams.set("path", request.path);
+    if (request.context !== undefined) url.searchParams.set("context", String(request.context));
+    if (request.before_context !== undefined) url.searchParams.set("before_context", String(request.before_context));
+    if (request.after_context !== undefined) url.searchParams.set("after_context", String(request.after_context));
+    if (request.word_regexp) url.searchParams.set("word_regexp", "true");
+    if (request.multiline) url.searchParams.set("multiline", "true");
+    if (request.multiline_dotall) url.searchParams.set("multiline_dotall", "true");
+    if (request.output_mode) url.searchParams.set("output_mode", request.output_mode);
+    if (request.head_limit !== undefined) url.searchParams.set("head_limit", String(request.head_limit));
+    if (request.offset) url.searchParams.set("offset", String(request.offset));
+    url.searchParams.set("wait", String(CODE_INDEX_WAIT_SECONDS));
+    return this.withBalancedKey((lease) => this.fetchUpstream(url, lease, "code"));
+  }
+
+  /** One `/v2/version-upgrade-guide` call. A 202 means the guide is being prepared. */
+  public async fetchUpgradeGuide(request: UpgradeGuideRequest): Promise<UpstreamReply> {
+    const url = new URL(`${API_BASE_URL}/v2/version-upgrade-guide`);
+    url.searchParams.set("libraryId", request.libraryId);
+    url.searchParams.set("fromVersion", request.fromVersion);
+    if (request.toVersion) url.searchParams.set("toVersion", request.toVersion);
+    url.searchParams.set("page", String(request.page ?? 1));
+    return this.withBalancedKey((lease) => this.fetchUpstream(url, lease, "upgrade-guide"));
   }
 
   /**
@@ -145,23 +233,25 @@ export class Context7ApiClient {
    * library ID Context7 names in `redirectUrl` (it sends no Location header, so
    * fetch cannot follow it), and says so at the top of the result.
    */
-  public async fetchLibraryContext(query: string, libraryId: string): Promise<string> {
+  public async fetchLibraryContext(query: string, libraryId: string, options: DocsOptions = {}): Promise<string> {
     try {
-      return await this.fetchLibraryContextOnce(query, libraryId);
+      return await this.fetchLibraryContextOnce(query, libraryId, options);
     } catch (error) {
       const target = error instanceof Context7ApiError && error.status === 301 ? redirectTarget(error.redirectUrl) : undefined;
       if (!target || target === libraryId) throw error;
       this.log(`Context7 library ${libraryId} redirected to ${target}`);
       noteRedirect(target);
-      const text = await this.fetchLibraryContextOnce(query, target);
+      const text = await this.fetchLibraryContextOnce(query, target, options);
       return `Note: Context7 library ${libraryId} has moved to ${target}; use that ID from now on.\n\n${text}`;
     }
   }
 
-  private async fetchLibraryContextOnce(query: string, libraryId: string): Promise<string> {
+  private async fetchLibraryContextOnce(query: string, libraryId: string, options: DocsOptions): Promise<string> {
     const url = new URL(`${API_BASE_URL}/v2/context`);
     url.searchParams.set("query", query);
     url.searchParams.set("libraryId", libraryId);
+    if (options.language) url.searchParams.set("language", options.language);
+    if (options.version) url.searchParams.set("version", options.version);
     return this.withBalancedKey(async (lease) => {
       const text = await this.fetchText(url, lease, "context");
       return text || DOCS_NOT_FOUND;
@@ -204,6 +294,29 @@ export class Context7ApiClient {
    * whole transfer and a body that fails partway is recorded as a failure.
    */
   private async fetchText(url: URL, lease: KeyLease, endpoint: UpstreamAttempt["endpoint"]): Promise<string> {
+    return (await this.fetchUpstream(url, lease, endpoint)).text;
+  }
+
+  /** A JSON object answer, for the per-key usage and experimental-tools lookups. */
+  private async fetchJson(
+    url: URL,
+    lease: KeyLease,
+    endpoint: UpstreamAttempt["endpoint"],
+    extraHeaders?: Record<string, string>,
+  ): Promise<Record<string, unknown>> {
+    const parsed: unknown = JSON.parse((await this.fetchUpstream(url, lease, endpoint, extraHeaders)).text);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error(`Context7 returned a ${endpoint} response that is not a JSON object.`);
+    }
+    return parsed as Record<string, unknown>;
+  }
+
+  private async fetchUpstream(
+    url: URL,
+    lease: KeyLease,
+    endpoint: UpstreamAttempt["endpoint"],
+    extraHeaders: Record<string, string> = EXPERIMENTAL_HEADERS,
+  ): Promise<UpstreamReply> {
     const started = performance.now();
     let response: Response;
     let detail: string;
@@ -212,6 +325,7 @@ export class Context7ApiClient {
         headers: {
           Authorization: `Bearer ${lease.value}`,
           "X-Context7-Source": "context7-key-rotator-mcp",
+          ...extraHeaders,
         },
         signal: AbortSignal.timeout(API_TIMEOUT_MS),
       });
@@ -232,7 +346,7 @@ export class Context7ApiClient {
 
     if (response.ok) {
       recordAttempt(attempt);
-      return detail;
+      return { status: response.status, text: detail };
     }
 
     const body = parseErrorBody(detail);

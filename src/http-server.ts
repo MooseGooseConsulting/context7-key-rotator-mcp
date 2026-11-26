@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
+import { fileURLToPath } from "node:url";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import { createMcpHandler } from "@modelcontextprotocol/server";
 import { Context7ApiClient } from "./context7-api.js";
@@ -11,7 +13,19 @@ export type HttpServerOptions = {
   record?: ToolCallRecorder;
   /** Receives handler and adapter failures. */
   logError?: (message: string, error: unknown) => void;
+  /** The bundled installer served at GET /install.mjs; `npm run build:installer` writes it. */
+  installerPath?: string;
 };
+
+const DEFAULT_INSTALLER = fileURLToPath(new URL("../dist-installer/install.mjs", import.meta.url));
+
+async function readInstaller(path = DEFAULT_INSTALLER): Promise<Buffer | undefined> {
+  try {
+    return await readFile(path);
+  } catch {
+    return undefined;
+  }
+}
 
 export function createHttpMcpServer(api: Context7ApiClient, options: HttpServerOptions = {}): Server {
   const logError = options.logError ?? ((message, error) => console.error(message, error));
@@ -25,12 +39,12 @@ export function createHttpMcpServer(api: Context7ApiClient, options: HttpServerO
 
   return createServer(async (request, response) => {
     const requestUrl = new URL(request.url ?? "/", "http://localhost");
-    // `ctx7 setup --mcp --base-url <this server>` asks this before it writes an
-    // agent's MCP entry. Clients need no key (the tailnet is the boundary), so
-    // setup writes a plain HTTP entry for <base>/mcp.
-    if (requestUrl.pathname === "/api/auth/mcp" && request.method === "GET") {
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ enabled: false }));
+    // The client installer, built into the image with this server, so the entry and skill it
+    // installs always match the tools this build serves. See installer/README.md.
+    if (requestUrl.pathname === "/install.mjs" && request.method === "GET") {
+      const installer = await readInstaller(options.installerPath);
+      response.writeHead(installer ? 200 : 404, { "content-type": installer ? "text/javascript; charset=utf-8" : "application/json", "cache-control": "no-store" });
+      response.end(installer ?? JSON.stringify({ error: "not_found", message: "This build has no installer." }));
       return;
     }
     if (requestUrl.pathname !== "/mcp") {

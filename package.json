@@ -9,6 +9,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "build:installer": "tsc -p tsconfig.installer.json && esbuild installer/install.ts --bundle --platform=node --format=esm --target=node22 --main-fields=module,main --loader:.md=text \"--banner:js=import{createRequire}from'node:module';const require=createRequire(import.meta.url);\" --outfile=dist-installer/install.mjs",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
     "test": "vitest run"
@@ -22,6 +23,9 @@
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
+    "add-mcp": "2.6.1",
+    "esbuild": "0.28.2",
+    "jsonc-parser": "3.3.1",
     "tsx": "^4.23.15",
     "typescript": "7.0.2",
     "vitest": "5.1.1"

@@ -7,6 +7,11 @@ function reputationLabel(score: number | undefined): "High" | "Medium" | "Low" |
   return "Low";
 }
 
+/** Upstream's hasSourceCode (utils.ts at 6335fd8): websites and llms.txt IDs have docs only. */
+function hasSourceCode(result: Pick<SearchResult, "id" | "branch">): boolean {
+  return !/^\/(websites|llmstxt)\//.test(result.id) && !result.branch?.startsWith("_");
+}
+
 function formatSearchResult(result: SearchResult): string {
   const lines = [
     `- Title: ${result.title}`,
@@ -19,6 +24,7 @@ function formatSearchResult(result: SearchResult): string {
   if (result.benchmarkScore !== undefined && result.benchmarkScore > 0) lines.push(`- Benchmark Score: ${result.benchmarkScore}`);
   if (result.versions?.length) lines.push(`- Versions: ${result.versions.join(", ")}`);
   if (result.source) lines.push(`- Source: ${result.source}`);
+  if (hasSourceCode(result)) lines.push("- Source code: searchable with grep-code, glob-code, read-code and find-symbol");
   return lines.join("\n");
 }
 
@@ -42,7 +48,20 @@ const obj = (value: unknown): Record<string, unknown> => value && typeof value =
  * requests for its teamspace. An unexpected shape is shown as JSON.
  */
 export function formatUsage(slots: SlotUsage[]): string {
-  return slots.map(({ slot, usage, error }) => {
+  return slots.map((slot) => `${usageBlock(slot)}\n${experimentalLine(slot)}`).join("\n\n");
+}
+
+/**
+ * Which experimental tools the key's teamspace has turned on in the Context7 dashboard. The code
+ * tools and the upgrade guide answer only for a key that has them on, so both keys should match.
+ */
+function experimentalLine({ experimental, experimentalError }: SlotUsage): string {
+  if (!experimental) return `- Experimental tools: unknown (${experimentalError ?? "no answer"})`;
+  if (experimental.all) return "- Experimental tools: all on";
+  return `- Experimental tools: ${experimental.tools?.length ? experimental.tools.join(", ") : "none on"}`;
+}
+
+function usageBlock({ slot, usage, error }: SlotUsage): string {
     if (!usage) return `Key slot ${slot}: usage unavailable: ${error ?? "no answer"}`;
     const member = obj(usage.member);
     const teamspace = obj(usage.teamspace);
@@ -62,5 +81,4 @@ export function formatUsage(slots: SlotUsage[]): string {
       lines.push(`- Extra paid requests: ${extra}${money}`);
     }
     return lines.join("\n");
-  }).join("\n\n");
 }
