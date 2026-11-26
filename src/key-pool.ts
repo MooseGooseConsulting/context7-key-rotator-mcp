@@ -36,6 +36,11 @@ export class RoundRobinKeyPool {
     return selected;
   }
 
+  /** Every key, in slot order, for calls that must ask about each key (usage). */
+  public all(): KeyLease[] {
+    return this.keys.map((_, index) => this.lease(index));
+  }
+
   public alternate(lease: KeyLease): KeyLease {
     return this.lease((lease.index + 1) % this.keys.length);
   }

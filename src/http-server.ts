@@ -25,6 +25,14 @@ export function createHttpMcpServer(api: Context7ApiClient, options: HttpServerO
 
   return createServer(async (request, response) => {
     const requestUrl = new URL(request.url ?? "/", "http://localhost");
+    // `ctx7 setup --mcp --base-url <this server>` asks this before it writes an
+    // agent's MCP entry. Clients need no key (the tailnet is the boundary), so
+    // setup writes a plain HTTP entry for <base>/mcp.
+    if (requestUrl.pathname === "/api/auth/mcp" && request.method === "GET") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ enabled: false }));
+      return;
+    }
     if (requestUrl.pathname !== "/mcp") {
       response.writeHead(404, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: "not_found", message: "Use POST /mcp." }));

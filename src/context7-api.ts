@@ -29,6 +29,9 @@ export type SearchResponse = {
   searchFilterApplied?: boolean;
 };
 
+/** One key's answer from `GET /api/v2/usage`, or why it could not be read. */
+export type SlotUsage = { slot: number; usage?: Record<string, unknown>; error?: string };
+
 export class Context7ApiError extends Error {
   public constructor(
     message: string,
@@ -115,6 +118,26 @@ export class Context7ApiClient {
     url.searchParams.set("query", query);
     url.searchParams.set("libraryName", libraryName);
     return this.withBalancedKey(async (lease) => JSON.parse(await this.fetchText(url, lease, "search")) as SearchResponse);
+  }
+
+  /**
+   * Asks Context7 how much of this month each key has used. Every key is asked,
+   * not the next in rotation, and the call does not count as a request.
+   */
+  public async usage(): Promise<SlotUsage[]> {
+    const url = new URL(`${API_BASE_URL}/v2/usage`);
+    url.searchParams.set("days", "1");
+    return Promise.all(this.keyPool.all().map(async (lease) => {
+      try {
+        const parsed: unknown = JSON.parse(await this.fetchText(url, lease, "usage"));
+        return parsed && typeof parsed === "object"
+          ? { slot: lease.index, usage: parsed as Record<string, unknown> }
+          : { slot: lease.index, error: "Context7 returned a usage response that is not a JSON object." };
+      } catch (error) {
+        const status = error instanceof Context7ApiError ? ` (HTTP ${error.status})` : "";
+        return { slot: lease.index, error: `${error instanceof Error ? error.message : String(error)}${status}`.slice(0, 300) };
+      }
+    }));
   }
 
   /**

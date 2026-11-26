@@ -81,13 +81,47 @@ async function postMcp(url: string, method: "tools/list" | "tools/call", id: num
 }
 
 describe("Streamable HTTP MCP endpoint", () => {
-  it("discovers only the two Context7 tools", async () => {
+  it("discovers the two Context7 lookup tools and the usage tool", async () => {
     const response = await postMcp(await startServer(), "tools/list", 1);
 
     expect(response.result.tools.map((tool: { name: string }) => tool.name)).toEqual([
       "resolve-library-id",
       "query-docs",
+      "context7-usage",
     ]);
+  });
+
+  it("tells ctx7 setup that the MCP endpoint needs no key", async () => {
+    const base = (await startServer()).replace(/\/mcp$/, "");
+    const response = await fetch(`${base}/api/auth/mcp`, { headers: { Accept: "application/json", Connection: "close" } });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ enabled: false });
+  });
+
+  it("reports each key's usage by slot, and a key whose usage cannot be read", async () => {
+    const seen: string[] = [];
+    const fetchImpl: FetchLike = async (url, init) => {
+      const auth = new Headers(init?.headers).get("authorization") ?? "";
+      seen.push(`${new URL(url).pathname} ${auth}`);
+      if (auth === "Bearer two") return new Response("{\"error\":\"unauthorized\"}", { status: 401 });
+      return Response.json({
+        plan: "free",
+        usageResetsAt: "2026-12-01T00:00:00Z",
+        member: { requests: 120, includedInPlan: 1000 },
+        teamspace: { extraRequests: 0 },
+      });
+    };
+    const api = new Context7ApiClient(new RoundRobinKeyPool(["one", "two"]), fetchImpl);
+
+    const response = await postMcp(await startServer(api), "tools/call", 9, "context7-usage", {});
+    const text: string = response.result.content[0].text;
+
+    expect(seen.sort()).toEqual(["/api/v2/usage Bearer one", "/api/v2/usage Bearer two"]);
+    expect(response.result.isError).toBeUndefined();
+    expect(text).toContain("Key slot 0 (free plan):\n- Requests this month: 120 of 1000 (880 left)\n- Resets: 2026-12-01T00:00:00Z");
+    expect(text).toContain("Key slot 1: usage unavailable:");
+    expect(text).not.toMatch(/Bearer|\bone\b|\btwo\b/);
   });
 
   it("serves native-compatible search formatting and Context7 V2 docs", async () => {

@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { Context7ApiClient, Context7ApiError, DOCS_NOT_FOUND } from "./context7-api.js";
-import { formatSearchResults } from "./format.js";
+import { formatSearchResults, formatUsage } from "./format.js";
 import { type RequestContext, requestContext, rotatorVersion } from "./telemetry.js";
 
 const resolveSchema = z.object({
@@ -165,6 +165,24 @@ Do not call this tool more than 3 times per question.`,
         return {
           result: { content: [{ type: "text" as const, text }] },
           outcome: text.endsWith(DOCS_NOT_FOUND) ? "empty" : undefined,
+        };
+      }),
+  );
+
+  server.registerTool(
+    "context7-usage",
+    {
+      title: "Context7 Usage",
+      description: `Reports how many Context7 requests each of this server's API keys has used this month, how many its plan includes, and when the count resets. Call it only when the user asks about Context7 usage or quota; it is not needed before looking up documentation.`,
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true, idempotentHint: true },
+    },
+    async () =>
+      observed(record, "context7-usage", {}, async () => {
+        const slots = await api.usage();
+        const failed = slots.every((slot) => !slot.usage);
+        return {
+          result: { content: [{ type: "text" as const, text: formatUsage(slots) }], ...(failed ? { isError: true } : {}) },
+          resultCount: slots.filter((slot) => slot.usage).length,
         };
       }),
   );
