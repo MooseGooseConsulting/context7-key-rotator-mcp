@@ -24,7 +24,7 @@ export function realEnv(home: string): Env {
   const run = (command: string, args: string[]): RunResult => {
     // Agent CLIs are .cmd shims on Windows, which only a shell can start. No argument has spaces.
     const result = spawnSync(command, args, { encoding: "utf8", shell: win, timeout: 60_000 });
-    return { status: result.status, stdout: `${result.stdout ?? ""}${result.stderr ?? ""}` };
+    return { status: result.status, stdout: result.stdout ?? "" };
   };
   const has = (command: string) => run(win ? "where" : "which", [command]).status === 0;
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -149,8 +149,20 @@ export async function findAgents(env: Env, addMcp: AddMcp): Promise<Agent[]> {
       (server) => ["mcp", "remove", server]));
   }
   if (env.has("devin")) {
-    const configPath = join(env.home, ".config", "devin", "mcp_config.json");
-    found.push(cliAgent(env, "devin", configPath, () => serversIn(readJsonc(configPath)?.mcpServers),
+    // `devin mcp list` also shows the Claude, Cursor and project servers Devin loads; only its own
+    // user file (~/.config/devin, or %APPDATA%\devin on Windows) is Devin's to change.
+    const configPath = process.platform === "win32"
+      ? join(process.env.APPDATA ?? join(env.home, "AppData", "Roaming"), "devin", "mcp_config.json")
+      : join(env.home, ".config", "devin", "mcp_config.json");
+    const servers = () => {
+      const result = env.run("devin", ["mcp", "list", "--json"]);
+      if (result.status !== 0) throw new Error(`devin mcp list failed (exit ${result.status})`);
+      const entries = JSON.parse(result.stdout) as Array<{ name: string; source: string; url?: string; command?: string; args?: string[] }>;
+      return entries
+        .filter((entry) => /(^|[\\/])devin[\\/]mcp_config\.json$/.test(entry.source))
+        .map(({ name, url, command, args }) => ({ name, config: { url, command, args } }));
+    };
+    found.push(cliAgent(env, "devin", configPath, servers,
       ["devin", "mcp", "add", SERVER_NAME, "-s", "user", "--url"],
       (server) => ["mcp", "remove", server, "-s", "user"]));
   }
@@ -332,7 +344,8 @@ export function checkClaudePlugins(env: Env): Item[] {
 }
 
 /**
- * Each agent's global skills folder, from vercel-labs/skills v1.9.0. omp is a pi fork and pi
+ * Each agent's global skills folder, from vercel-labs/skills v1.9.0, except Devin, which also reads
+ * ~/.agents/skills (`devin skills paths`). omp is a pi fork and pi
  * reads ~/.agents/skills (inferred: omp's own docs do not say).
  */
 export const SKILL_DIRS: Record<string, string> = {
@@ -341,7 +354,7 @@ export const SKILL_DIRS: Record<string, string> = {
   omp: ".agents/skills",
   antigravity: ".gemini/config/skills",
   cursor: ".cursor/skills",
-  devin: ".config/devin/skills",
+  devin: ".agents/skills",
   "gemini-cli": ".gemini/skills",
   "github-copilot-cli": ".copilot/skills",
   "kilo-code": ".kilo/skills",
